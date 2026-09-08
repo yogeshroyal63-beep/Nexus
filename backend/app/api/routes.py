@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 
+import httpx
 from fastapi import APIRouter, HTTPException, Request
 
 from app.agents.coordinator import run_nexus
@@ -191,6 +192,36 @@ async def sns_drift_check(request: Request):
         body = await request.json()
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Invalid request body: {exc}") from exc
+
+    # FIXED — SNS subscription handshake was never handled (found while
+    # preparing an actual deploy, not observed in production): every SNS
+    # topic sends a one-time "SubscriptionConfirmation" message to a newly
+    # subscribed HTTPS endpoint, containing a SubscribeURL that must be
+    # fetched (GET) to complete the subscription. This endpoint only ever
+    # looked at body["Message"] and tried to parse it as drift-check
+    # payload JSON — a SubscriptionConfirmation's top-level shape has no
+    # such field, so the handshake would silently no-op and the
+    # subscription would sit in PendingConfirmation forever, meaning the
+    # EventBridge -> SNS -> this endpoint trigger chain would never
+    # actually fire despite `aws sns subscribe` reporting success.
+    message_type = request.headers.get("x-amz-sns-message-type")
+    if message_type == "SubscriptionConfirmation":
+        subscribe_url = body.get("SubscribeURL")
+        if not subscribe_url:
+            raise HTTPException(status_code=400, detail="SubscriptionConfirmation missing SubscribeURL.")
+        # SubscribeURL always points at *.amazonaws.com — safe to fetch
+        # directly; this is the confirmation step AWS's own docs describe.
+        async with httpx.AsyncClient(timeout=10) as client:
+            confirm_resp = await client.get(subscribe_url)
+        logger.info(
+            "Confirmed SNS subscription (topic=%s, status=%s)",
+            body.get("TopicArn"), confirm_resp.status_code,
+        )
+        return {"status": "subscription_confirmed", "topic_arn": body.get("TopicArn")}
+
+    if message_type == "UnsubscribeConfirmation":
+        logger.info("Received SNS UnsubscribeConfirmation for topic=%s", body.get("TopicArn"))
+        return {"status": "unsubscribe_acknowledged"}
 
     # Handle SNS notification format
     message_str = body.get("Message", "{}")

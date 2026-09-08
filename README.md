@@ -36,7 +36,7 @@ Detect drift → Isolate root cause (causal DAG) → Reason (Groq LLaMA 3.3)
 | Layer | Technology |
 |-------|-----------|
 | Agent orchestration | **AWS Strands Agents SDK** |
-| LLM reasoning (Planner) | **Amazon Bedrock** — Claude 3.5 Sonnet |
+| LLM reasoning (Planner) | **Amazon Bedrock** — Claude Sonnet 4.5 |
 | LLM reasoning (Explainer) | Groq — LLaMA 3.3 70B |
 | Memory | **AWS DynamoDB** (local JSON fallback) |
 | Background triggers | **AWS SNS + EventBridge** |
@@ -137,7 +137,7 @@ Nexus now runs autonomously every 30 minutes without any developer action.
 | `AWS_REGION` | For AWS | AWS region (default: us-east-1) |
 | `AWS_ACCESS_KEY_ID` | For AWS | AWS access key |
 | `AWS_SECRET_ACCESS_KEY` | For AWS | AWS secret key |
-| `BEDROCK_MODEL_ID` | For Strands | Bedrock model (default: claude-3-5-sonnet) |
+| `BEDROCK_MODEL_ID` | For Strands | Bedrock model (default: claude-sonnet-4-5). Check `aws bedrock list-foundation-models` for what's actually available in your account/region before deploying — Bedrock's Anthropic catalog changes over time. |
 | `MEMORY_BACKEND` | No | `local` (default) or `dynamodb` |
 | `GITHUB_TOKEN` | No | For GitHub issue write-back |
 | `GITHUB_REPO` | No | `owner/repo` for write-back |
