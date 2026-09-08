@@ -206,6 +206,34 @@ function OutcomeCard({ outcome }) {
           <span className="badge badge-neutral">rollback ref: {outcome.rollback_reference}</span>
         </div>
       )}
+      {outcome.follow_up && (
+        <div style={{
+          marginTop: '1rem',
+          paddingTop: '1rem',
+          borderTop: '1px dashed var(--border)',
+        }}>
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.5rem',
+            fontSize: '0.75rem', fontFamily: 'var(--font-mono)', color: 'var(--signal-warn)',
+            textTransform: 'uppercase', letterSpacing: '0.04em',
+          }}>
+            <span>↳</span>
+            <span>Automatic follow-up — verification failed</span>
+          </div>
+          <p style={{ fontSize: '0.83rem', color: 'var(--text-mid)', lineHeight: 1.6 }}>
+            {outcome.follow_up.execution_detail}
+          </p>
+          <span
+            className="badge"
+            style={{ marginTop: '0.4rem', display: 'inline-block' }}
+            data-executed={outcome.follow_up.executed}
+          >
+            {outcome.follow_up.executed
+              ? `✓ ${outcome.follow_up.plan.action_type.replace(/_/g, ' ')} succeeded`
+              : `✗ ${outcome.follow_up.plan.action_type.replace(/_/g, ' ')} did not complete — manual review needed`}
+          </span>
+        </div>
+      )}
     </div>
   )
 }
@@ -215,7 +243,11 @@ function EscalationCard({ result, onApproved }) {
   const [error, setError] = useState(null)
   const [approved, setApproved] = useState(null)
 
-  if (!result?.escalated) return null
+  // Stay visible once approved, even if the parent's merged `result` ever
+  // lost its `escalated` flag for any reason — the component's own
+  // knowledge that IT handled an approval must not depend on the shape of
+  // whatever object the parent happens to pass down afterward.
+  if (!approved && !result?.escalated) return null
 
   const handleApprove = async () => {
     setApproving(true)
@@ -314,9 +346,13 @@ function MemoryCard({ similarCount }) {
 
 const LOOP_STEPS = ['Detect', 'Diagnose', 'Plan', 'Execute', 'Verify', 'Remember']
 
-export default function AgentActionView({ result }) {
-  const [liveResult, setLiveResult] = useState(null)
-  const active = liveResult || result
+export default function AgentActionView({ result, onApproved }) {
+  // No local liveResult copy — approval updates flow through onApproved
+  // straight into the parent's own `result` state (see App.jsx), so this
+  // view and StatusFooter (which reads the same parent state directly)
+  // can never show two different, disconnected pictures of the same
+  // incident after an approval.
+  const active = result
 
   if (!active?.plan) {
     return (
@@ -346,7 +382,7 @@ export default function AgentActionView({ result }) {
       <div className="stagger">
         <MemoryCard similarCount={active.similar_past_incidents?.length} />
         <PlanCard plan={active.plan} />
-        <EscalationCard result={active} onApproved={setLiveResult} />
+        <EscalationCard result={active} onApproved={onApproved} />
         <OutcomeCard outcome={active.outcome} />
       </div>
     </div>

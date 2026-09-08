@@ -73,6 +73,16 @@ class DriftSeverity(str, Enum):
     MODERATE = "moderate"
     HIGH = "high"
     CRITICAL = "critical"
+    # Not a drift measurement at all — baseline or current sample size was
+    # below the statistical reliability floor (see settings.MIN_SAMPLE_
+    # SIZE_FOR_DRIFT_TEST). Distinct from NONE (measured, genuinely no
+    # drift) so a data outage or a not-yet-populated window is never
+    # silently conflated with "the model is healthy", and distinct from
+    # CRITICAL so degenerate input (e.g. an empty array, which previously
+    # produced NaN statistics that fell through every comparison to the
+    # CRITICAL catch-all) is never misread as the most severe possible
+    # drift finding.
+    INSUFFICIENT_DATA = "insufficient_data"
 
 
 class FeatureDriftResult(_NoProtectedNamespace):
@@ -108,6 +118,21 @@ class CausalCandidate(_NoProtectedNamespace):
     hops_from_model: int
     drift_result: FeatureDriftResult
     is_genuine_cause: bool
+    fdr_adjusted_p_value: float = Field(
+        default=1.0,
+        description=(
+            "Benjamini-Hochberg FDR-corrected p-value for this node's drift test, "
+            "computed jointly across ALL ancestor nodes tested in the same run "
+            "(not this node's raw KS-test p-value in isolation). A node only "
+            "proceeds to the intervention check if this clears the FDR threshold — "
+            "protects against false 'root causes' from pure multiple-testing noise."
+        ),
+    )
+    survived_fdr_correction: bool = Field(
+        default=False,
+        description="Whether this node's drift remained significant after "
+        "correcting for testing multiple ancestor nodes simultaneously.",
+    )
     intervention_delta: float = Field(
         description=(
             "Mean change in downstream drift signal when this node's contribution "
@@ -141,6 +166,15 @@ class RootCauseTrace(_NoProtectedNamespace):
         description="Subset of candidates_examined judged to be genuine causes, ranked by intervention_delta"
     )
     graph_path: list[str] = Field(description="URNs from root cause to model, in order")
+    fdr_uncorrected_false_positive_risk: float = Field(
+        default=0.0,
+        description=(
+            "P(at least one false-positive candidate) if ancestor drift tests had "
+            "been evaluated at raw alpha=0.05 without FDR correction, given how "
+            "many ancestor nodes were tested this run. Surfaced so the report can "
+            "state exactly how much noise the correction step removed."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +260,17 @@ class ActionOutcome(_NoProtectedNamespace):
         default=None, description="None = not yet checked; True/False = post-action verification result"
     )
     verification_detail: Optional[str] = None
+    follow_up: Optional["ActionOutcome"] = Field(
+        default=None,
+        description=(
+            "If verification found the original action did NOT resolve the drift "
+            "(verified=False), the automatic corrective action the Coordinator took "
+            "in response: a rollback (if the original action was reversible) or an "
+            "auto-opened incident ticket (if not). None if verification passed, "
+            "wasn't run, or this outcome IS itself a follow-up (bounded to one level "
+            "— no recursive follow-up chains)."
+        ),
+    )
 
 
 class IncidentRecord(_NoProtectedNamespace):

@@ -10,6 +10,39 @@ Real applied statistics, not "ask the LLM if this looks different":
   - The same KS-test machinery is reused for prediction-output drift
     (comparing the live prediction distribution to a training-time /
     recent-baseline distribution).
+
+FIXED — degenerate input silently misclassified as CRITICAL (found via
+testing with realistic failure inputs, not observed in production, but
+directly exploitable): every one of the four functions below assumed
+well-formed, reasonably-sized, non-empty input arrays with no validation.
+An empty `current` array — a completely realistic production scenario,
+e.g. an upstream pipeline outage producing zero rows for a time window —
+caused `scipy.stats.ks_2samp` to return `statistic=nan, p_value=nan`.
+Because NaN comparisons are always False in IEEE-754 (`nan >= x` and
+`nan < x` are both False for any x), `_severity_from_pvalue`'s cascading
+if/elif chain fell through EVERY bucket check and hit the final
+`return DriftSeverity.CRITICAL` catch-all. The practical consequence: a
+data outage — not model drift at all — would be classified as the most
+severe possible drift finding and could drive the Strands Planner into a
+real remediation action (trigger_retrain, even rollback_model_version)
+in response to what was actually just missing data.
+
+PSI had the same class of bug (empty `current` produced PSI≈11.5, far
+outside any real drift range, still bucketed as CRITICAL) plus a second,
+worse failure: an empty `baseline` array crashed outright with an
+unhandled IndexError from `baseline.min()`/`.max()`.
+
+Fixed with an explicit minimum-sample-size guard at the top of every
+function (`settings.MIN_SAMPLE_SIZE_FOR_DRIFT_TEST`, default 20 — a
+widely-used rule of thumb below which KS/PSI are known to be statistically
+unreliable). Below the floor, functions return
+`DriftSeverity.INSUFFICIENT_DATA` — a new, explicit third state distinct
+from both NONE (measured, genuinely no drift) and CRITICAL (measured,
+severe drift) — rather than attempting a computation the underlying
+statistics can't support. `is_drift_alerting()` treats INSUFFICIENT_DATA
+as non-alerting (an autonomous action must never fire on "we don't know"),
+while the result itself remains fully visible in the report/UI so a human
+can tell a data-quality problem apart from actual drift.
 """
 from __future__ import annotations
 
@@ -25,6 +58,15 @@ from app.models.schemas import (
     FeatureDriftResult,
     PredictionDriftResult,
 )
+
+
+# ---------------------------------------------------------------------------
+# Sample-size reliability guard
+# ---------------------------------------------------------------------------
+
+def _insufficient_sample_size(baseline_len: int, current_len: int) -> bool:
+    floor = settings.MIN_SAMPLE_SIZE_FOR_DRIFT_TEST
+    return baseline_len < floor or current_len < floor
 
 
 # ---------------------------------------------------------------------------
@@ -79,6 +121,20 @@ def ks_test_drift(
     current_window: str,
 ) -> FeatureDriftResult:
     """Two-sample Kolmogorov-Smirnov test for numeric feature drift."""
+    if _insufficient_sample_size(len(baseline), len(current)):
+        return FeatureDriftResult(
+            node_urn=node_urn,
+            feature_name=feature_name,
+            method=DriftMethod.KS_TEST,
+            statistic=0.0,
+            p_value=None,
+            severity=DriftSeverity.INSUFFICIENT_DATA,
+            baseline_window=baseline_window,
+            current_window=current_window,
+            sample_size_baseline=len(baseline),
+            sample_size_current=len(current),
+        )
+
     statistic, p_value = stats.ks_2samp(baseline, current)
     return FeatureDriftResult(
         node_urn=node_urn,
@@ -112,6 +168,20 @@ def psi_drift(
     magnitude for how much a distribution has shifted, complementing the
     KS-test's significance test.
     """
+    if _insufficient_sample_size(len(baseline), len(current)):
+        return FeatureDriftResult(
+            node_urn=node_urn,
+            feature_name=feature_name,
+            method=DriftMethod.PSI,
+            statistic=0.0,
+            psi_score=None,
+            severity=DriftSeverity.INSUFFICIENT_DATA,
+            baseline_window=baseline_window,
+            current_window=current_window,
+            sample_size_baseline=len(baseline),
+            sample_size_current=len(current),
+        )
+
     eps = 1e-6
     quantiles = np.linspace(0, 1, n_bins + 1)
     bin_edges = np.unique(np.quantile(baseline, quantiles))
@@ -155,6 +225,19 @@ def embedding_centroid_drift(
     current embeddings, for unstructured/text features where KS/PSI don't
     apply directly to raw values.
     """
+    if _insufficient_sample_size(len(baseline_embeddings), len(current_embeddings)):
+        return FeatureDriftResult(
+            node_urn=node_urn,
+            feature_name=feature_name,
+            method=DriftMethod.EMBEDDING_COSINE,
+            statistic=0.0,
+            severity=DriftSeverity.INSUFFICIENT_DATA,
+            baseline_window=baseline_window,
+            current_window=current_window,
+            sample_size_baseline=len(baseline_embeddings),
+            sample_size_current=len(current_embeddings),
+        )
+
     baseline_centroid = baseline_embeddings.mean(axis=0)
     current_centroid = current_embeddings.mean(axis=0)
 
@@ -182,6 +265,16 @@ def prediction_output_drift(
 ) -> PredictionDriftResult:
     """KS-test on the model's own output distribution over time — this is
     what actually triggers an investigation (spec Section 2, step 1-2)."""
+    if _insufficient_sample_size(len(baseline_predictions), len(current_predictions)):
+        return PredictionDriftResult(
+            model_urn=model_urn,
+            method=DriftMethod.KS_TEST,
+            statistic=0.0,
+            p_value=None,
+            severity=DriftSeverity.INSUFFICIENT_DATA,
+            detected_at=datetime.now(timezone.utc),
+        )
+
     statistic, p_value = stats.ks_2samp(baseline_predictions, current_predictions)
     return PredictionDriftResult(
         model_urn=model_urn,
@@ -194,4 +287,7 @@ def prediction_output_drift(
 
 
 def is_drift_alerting(result: FeatureDriftResult | PredictionDriftResult) -> bool:
-    return result.severity not in (DriftSeverity.NONE,)
+    # INSUFFICIENT_DATA must never be treated as alerting — an autonomous
+    # remediation action must never fire on "we don't have enough data to
+    # tell", only on a genuinely measured drift finding.
+    return result.severity not in (DriftSeverity.NONE, DriftSeverity.INSUFFICIENT_DATA)

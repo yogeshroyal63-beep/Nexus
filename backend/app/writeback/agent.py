@@ -15,6 +15,7 @@ import httpx
 from app.config import settings
 from app.lineage.datahub_client import BaseLineageClient
 from app.models.schemas import RootCauseReport, WriteBackResult
+from app.utils.github_dedup import compute_issue_fingerprint, find_matching_open_issue_url
 
 logger = logging.getLogger(__name__)
 
@@ -52,12 +53,14 @@ def _render_github_issue_body(report: RootCauseReport) -> str:
     lines += ["", "## Suggested Fixes"]
     for fix in report.suggested_fixes:
         lines.append(f"- **{fix.action}** on `{fix.target_urn}` — {fix.rationale}")
+    p_value = report.raw_trace.prediction_drift.p_value
+    p_value_str = f"{p_value:.4g}" if p_value is not None else "n/a (insufficient sample size)"
     lines += [
         "",
         "## Statistical Evidence",
         f"- Prediction drift: `{report.raw_trace.prediction_drift.method.value}` "
         f"statistic={report.raw_trace.prediction_drift.statistic:.4f}, "
-        f"p={report.raw_trace.prediction_drift.p_value:.4g}, "
+        f"p={p_value_str}, "
         f"severity={report.raw_trace.prediction_drift.severity.value}",
         "",
         "| Candidate | Hops | Method | Statistic | Intervention Δ | Genuine Cause? |",
@@ -88,12 +91,30 @@ class WriteBackAgent:
         return await self.lineage_client.write_incident(report.model_urn, payload)
 
     async def open_github_issue(self, report: RootCauseReport) -> str | None:
+        """
+        Opens a GitHub issue reporting the diagnosis.
+
+        FIXED — same idempotency gap the executor's escalation ticket had
+        (see app/utils/github_dedup.py docstring): this had a real
+        external side effect (a real GitHub issue) with zero protection
+        against running twice for the same underlying finding — e.g.
+        /api/investigate called twice for the same drift event, or a
+        retried request after a network blip. Fixed with the same
+        fingerprint + search-before-create pattern, sharing the exact
+        implementation with the executor rather than a second copy that
+        could drift out of sync.
+        """
         if not settings.WRITEBACK_ENABLED:
             return None  # safety gate: disabled by default for public demo deployments
         if not settings.GITHUB_TOKEN or not settings.GITHUB_REPO:
             return None
-        title = f"[Drift Detected] {report.summary[:80]}"
+
+        fingerprint = compute_issue_fingerprint(
+            report.model_urn, ",".join(sorted(report.root_causes))
+        )
+        title = f"[nexus:{fingerprint}] [Drift Detected] {report.summary[:80]}"
         body = _render_github_issue_body(report)
+
         async with httpx.AsyncClient(
             base_url=GITHUB_API,
             headers={
@@ -102,6 +123,33 @@ class WriteBackAgent:
             },
             timeout=15.0,
         ) as client:
+            # Fails open on search failure (rate limit, transient network
+            # error) — proceeds to create rather than silently dropping a
+            # real diagnosis, since a missed report is worse than an
+            # occasional duplicate.
+            try:
+                search_resp = await client.get(
+                    "/search/issues",
+                    params={
+                        "q": f'repo:{settings.GITHUB_REPO} in:title "[nexus:{fingerprint}]" state:open'
+                    },
+                )
+                search_resp.raise_for_status()
+                existing_url = find_matching_open_issue_url(search_resp.json(), fingerprint)
+                if existing_url:
+                    logger.info(
+                        "Open issue already exists for fingerprint %s; skipping duplicate create: %s",
+                        fingerprint, existing_url,
+                    )
+                    return existing_url
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Idempotency search for fingerprint %s failed (%s); "
+                    "proceeding to create a new issue rather than skipping "
+                    "the report.",
+                    fingerprint, exc,
+                )
+
             resp = await client.post(
                 f"/repos/{settings.GITHUB_REPO}/issues",
                 json={"title": title, "body": body, "labels": ["drift-detected", "auto-generated"]},

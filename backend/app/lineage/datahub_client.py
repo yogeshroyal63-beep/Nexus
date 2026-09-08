@@ -38,6 +38,7 @@ the argument names below still match; adjust `_call_tool` arguments if not.
 from __future__ import annotations
 
 import json
+import logging
 from contextlib import AsyncExitStack
 from typing import Any
 
@@ -45,6 +46,8 @@ import abc
 
 from app.config import settings
 from app.models.schemas import LineageEdge, LineageGraph, LineageNode, NodeType
+
+logger = logging.getLogger(__name__)
 
 
 class BaseLineageClient(abc.ABC):
@@ -167,6 +170,34 @@ def _parse_datahub_lineage_response(raw: Any, root_model_urn: str) -> LineageGra
     flatter {"results": [{"urn", "hops", "paths"}, ...]} shape some versions
     return. Verify against your installed version's actual output (call
     `list_tools()` / run the tool once) and adjust here if it differs.
+
+    FIXED — two real gaps, verified with direct reproductions before
+    fixing (not observed against a live DataHub instance, but directly
+    exploitable against any malformed/unexpected response):
+
+    1. Bracket access (entity["urn"], rel["upstreamUrn"]/["downstreamUrn"])
+       raised an uncaught KeyError the moment a SINGLE entity or
+       relationship in an otherwise-valid response was missing a field —
+       taking down parsing of the ENTIRE graph over one bad item. This
+       module's own docstring already documents that exact per-tool
+       parameter names shift across mcp-server-datahub releases, so a
+       partially-malformed response is an expected real-world risk, not a
+       theoretical one. Fixed by skipping (with a logged warning) any
+       entity/relationship missing its identifying field, rather than
+       crashing the whole response over it.
+
+    2. A response in neither recognized shape (e.g. the plain-text
+       fallback _call_tool returns when a tool's output isn't valid JSON)
+       fell through both isinstance/key checks and silently returned an
+       EMPTY LineageGraph — no error, no log. Downstream, build_dag() gets
+       zero nodes, upstream_nodes() returns [], and the pipeline concludes
+       "no ancestors, therefore no possible root cause" — completely
+       masking a LINEAGE INGESTION FAILURE as "nothing to investigate",
+       which is a fundamentally different and much worse conclusion than
+       what actually happened. Fixed by raising a clear, specific error
+       for genuinely unrecognized response shapes, so this surfaces as an
+       actionable failure (via the existing route-level error handling)
+       instead of a silently wrong "success".
     """
     nodes: list[LineageNode] = []
     edges: list[LineageEdge] = []
@@ -179,10 +210,19 @@ def _parse_datahub_lineage_response(raw: Any, root_model_urn: str) -> LineageGra
 
     if isinstance(raw, dict) and "entities" in raw:
         for entity in raw.get("entities", []):
+            urn = entity.get("urn")
+            if not urn:
+                logger.warning(
+                    "Skipping a DataHub lineage entity with no 'urn' field "
+                    "(entity keys present: %s) — cannot represent a node "
+                    "without its identity.",
+                    list(entity.keys()) if isinstance(entity, dict) else type(entity).__name__,
+                )
+                continue
             nodes.append(
                 LineageNode(
-                    urn=entity["urn"],
-                    name=entity.get("name", entity["urn"]),
+                    urn=urn,
+                    name=entity.get("name", urn),
                     node_type=type_map.get(entity.get("entityType", "DATASET"), NodeType.DATASET),
                     platform=entity.get("platform"),
                     description=entity.get("description"),
@@ -191,20 +231,50 @@ def _parse_datahub_lineage_response(raw: Any, root_model_urn: str) -> LineageGra
                 )
             )
         for rel in raw.get("relationships", []):
+            upstream_urn = rel.get("upstreamUrn")
+            downstream_urn = rel.get("downstreamUrn")
+            if not upstream_urn or not downstream_urn:
+                logger.warning(
+                    "Skipping a DataHub lineage relationship missing "
+                    "upstreamUrn/downstreamUrn (keys present: %s).",
+                    list(rel.keys()) if isinstance(rel, dict) else type(rel).__name__,
+                )
+                continue
             edges.append(
                 LineageEdge(
-                    upstream_urn=rel["upstreamUrn"],
-                    downstream_urn=rel["downstreamUrn"],
+                    upstream_urn=upstream_urn,
+                    downstream_urn=downstream_urn,
                     relationship=rel.get("type", "derives_from"),
                 )
             )
     elif isinstance(raw, dict) and "results" in raw:
         for item in raw.get("results", []):
-            urn = item["urn"]
+            urn = item.get("urn")
+            if not urn:
+                logger.warning(
+                    "Skipping a DataHub lineage result item with no 'urn' "
+                    "field (keys present: %s).",
+                    list(item.keys()) if isinstance(item, dict) else type(item).__name__,
+                )
+                continue
             nodes.append(LineageNode(urn=urn, name=urn, node_type=NodeType.DATASET))
             for path in item.get("paths", []):
                 for a, b in zip(path, path[1:]):
-                    edges.append(LineageEdge(upstream_urn=a, downstream_urn=b))
+                    if a and b:
+                        edges.append(LineageEdge(upstream_urn=a, downstream_urn=b))
+    else:
+        # Genuinely unrecognized shape — NOT the same as "zero lineage".
+        # Raising here (rather than silently returning an empty graph) is
+        # what makes an ingestion failure visible as a failure instead of
+        # being misread as "this model has no upstream dependencies".
+        raise ValueError(
+            f"Unrecognized DataHub lineage response shape for {root_model_urn}: "
+            f"expected a dict with 'entities' or 'results', got "
+            f"{type(raw).__name__}"
+            + (f" (dict keys: {list(raw.keys())})" if isinstance(raw, dict) else "")
+            + ". The mcp-server-datahub response format may have changed — "
+            "see this function's docstring for the versions this was verified against."
+        )
 
     return LineageGraph(nodes=nodes, edges=edges, root_model_urn=root_model_urn)
 
