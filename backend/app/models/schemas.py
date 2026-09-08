@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -193,7 +193,18 @@ class RootCauseReport(_NoProtectedNamespace):
     summary: str
     detailed_explanation: str
     root_causes: list[str] = Field(description="Human-readable names of isolated root cause nodes")
-    confidence: str = Field(description="'low' | 'moderate' | 'high', based on intervention_delta magnitude & confounding")
+    # FIXED — confidence was a plain `str`, so "very confident", "Low"
+    # (wrong case), or "" all constructed successfully despite the
+    # docstring's 'low' | 'moderate' | 'high' contract, and despite
+    # llm/reasoning.py's own case-normalization step being written on the
+    # assumption that this field enforces the closed set afterward. Found
+    # via tests/test_schemas.py::TestConfidenceIsClosedType, which expected
+    # exactly this and failed against the old `str` type. A closed
+    # Literal makes invalid/wrongly-cased values impossible to construct
+    # rather than merely discouraged by convention.
+    confidence: Literal["low", "moderate", "high"] = Field(
+        description="'low' | 'moderate' | 'high', based on intervention_delta magnitude & confounding"
+    )
     suggested_fixes: list[SuggestedFix]
     raw_trace: RootCauseTrace
 

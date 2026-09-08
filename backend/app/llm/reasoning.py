@@ -94,7 +94,32 @@ def _enforce_grounding(parsed: dict, trace: RootCauseTrace) -> dict:
 class LLMReasoningLayer:
     def __init__(self, model: str | None = None):
         self.model = model or settings.LLM_MODEL
-        self._client = Groq(api_key=settings.GROQ_API_KEY)
+        # Client construction deliberately deferred out of __init__ and into
+        # generate_report()'s own try/except (see _get_client below).
+        #
+        # FIXED — client-construction crash bypassed the fallback safety net
+        # entirely (found by running the documented zero-cost/no-API-key
+        # quickstart path, not observed in production): Groq(api_key=...)
+        # was previously called here, in __init__. Any failure at
+        # construction time — no API key configured, or (as actually
+        # happened) an installed groq/httpx combination where groq's
+        # internal client still passed a `proxies` kwarg that httpx had
+        # already removed — raised immediately, before generate_report()'s
+        # try/except (built specifically to catch GroqError and fall back
+        # to _deterministic_fallback_report) ever ran. The exception
+        # propagated straight out of get_reasoning_layer() as an uncaught
+        # 500, defeating the whole purpose of the fallback path on exactly
+        # the "no GROQ_API_KEY set" scenario the README's quickstart
+        # describes as supported. Fixed by constructing the client lazily,
+        # inside generate_report()'s existing try/except, so any
+        # construction-time failure is caught by the same
+        # retry-then-deterministic-fallback logic as an API call failure.
+        self._client: Groq | None = None
+
+    def _get_client(self) -> Groq:
+        if self._client is None:
+            self._client = Groq(api_key=settings.GROQ_API_KEY)
+        return self._client
 
     def generate_report(self, trace: RootCauseTrace, _retries: int = 1) -> RootCauseReport:
         evidence_payload = trace.model_dump(mode="json")
@@ -102,7 +127,8 @@ class LLMReasoningLayer:
 
         for attempt in range(_retries + 1):
             try:
-                response = self._client.chat.completions.create(
+                client = self._get_client()
+                response = client.chat.completions.create(
                     model=self.model,
                     max_tokens=settings.LLM_MAX_TOKENS,
                     temperature=0,
@@ -149,6 +175,21 @@ class LLMReasoningLayer:
             except GroqError as exc:
                 last_error = exc
                 logger.warning("LLM API call failed on attempt %d/%d: %s", attempt + 1, _retries + 1, exc)
+            except Exception as exc:
+                # Catches client-construction failures surfaced via
+                # _get_client() (missing/invalid API key, an
+                # installed-package-version incompatibility raising
+                # TypeError, etc.) that are not GroqError instances. These
+                # are not worth retrying — the same construction call will
+                # fail identically on every attempt — but they must still
+                # land on the deterministic fallback below rather than
+                # propagate as an uncaught 500.
+                last_error = exc
+                logger.error(
+                    "LLM reasoning layer hit an unexpected error on attempt %d/%d: %s",
+                    attempt + 1, _retries + 1, exc,
+                )
+                break
 
         logger.error("LLM reasoning layer failed after %d attempts; using deterministic fallback.", _retries + 1)
         return _deterministic_fallback_report(trace)

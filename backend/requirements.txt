@@ -1,13 +1,19 @@
 --only-binary=scipy,numpy
 fastapi==0.115.0
+starlette==0.38.6
 uvicorn[standard]==0.31.1
 pydantic==2.11.7
 pydantic-settings==2.5.2
-httpx==0.27.2
+# httpx pin driven by strands-agents (requires httpx>=0.28.1). groq is
+# bumped to 0.13.0 below specifically because it's the first release whose
+# internal httpx client construction stops passing the removed `proxies`
+# kwarg, so it actually works with httpx>=0.28 at runtime (its own
+# declared requirement, httpx<1,>=0.23.0, is too loose to catch this).
+httpx==0.28.1
 scipy==1.14.1
 numpy==1.26.4
 networkx==3.3
-groq==0.11.0
+groq==0.13.0
 python-dotenv==1.0.1
 pytest==8.3.3
 pytest-asyncio==0.24.0
