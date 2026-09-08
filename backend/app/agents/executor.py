@@ -28,14 +28,36 @@ from datetime import datetime, timezone
 import httpx
 
 from app.config import settings
-from app.models.schemas import ActionOutcome, RemediationActionType, RemediationPlan
+from app.models.schemas import ActionOutcome, RemediationActionType, RemediationPlan, RiskLevel
+from app.utils.github_dedup import compute_issue_fingerprint, find_matching_open_issue_url
 
 logger = logging.getLogger(__name__)
 
 GITHUB_API = "https://api.github.com"
 
+# Re-exported under their original names for backward compatibility with
+# existing imports/tests (app.agents.executor._compute_escalation_fingerprint,
+# ._find_matching_open_issue_url) after this logic moved to
+# app.utils.github_dedup to be shared with app.writeback.agent, which had
+# the identical gap.
+_compute_escalation_fingerprint = compute_issue_fingerprint
+_find_matching_open_issue_url = find_matching_open_issue_url
+
 
 class ExecutorAgent:
+    """
+    Idempotency scope: _open_incident_ticket has a real external side
+    effect (creates a GitHub issue) and is protected against duplicate
+    creation via a fingerprint-based search-before-create check — see
+    _compute_escalation_fingerprint. The simulated handlers below
+    (_trigger_retrain, _rollback_model_version, _quarantine_data_source)
+    have no real external system wired up in this build, so calling
+    execute() twice for the same plan just logs two fake job IDs rather
+    than causing a real duplicate resource — acceptable for the demo, but
+    a genuine production integration with a real orchestrator/registry
+    would need the same fingerprint-based dedup pattern applied there too.
+    """
+
     async def execute(self, plan: RemediationPlan) -> ActionOutcome:
         handler = self._HANDLERS.get(plan.action_type)
         if handler is None:
@@ -148,13 +170,18 @@ class ExecutorAgent:
                 ),
                 reversible=False,
             )
-        title = f"[Sentinel] Escalated action needed: {plan.action_type.value} on {plan.target_urn}"
+
+        fingerprint = _compute_escalation_fingerprint(
+            plan.model_urn, plan.target_urn, plan.action_type.value
+        )
+        title = f"[nexus:{fingerprint}] Escalated action needed: {plan.action_type.value} on {plan.target_urn}"
         body = (
             f"**Rationale:** {plan.rationale}\n\n"
             f"**Confidence:** {plan.confidence:.2f}\n"
             f"**Risk level:** {plan.risk_level.value}\n\n"
             f"_Opened automatically by Nexus's Executor agent._"
         )
+
         async with httpx.AsyncClient(
             base_url=GITHUB_API,
             headers={
@@ -163,6 +190,38 @@ class ExecutorAgent:
             },
             timeout=15.0,
         ) as client:
+            # Idempotency check: has this exact underlying escalation
+            # already been opened and left unresolved? Search failures
+            # (rate limit, transient network error) fail OPEN — proceed to
+            # create rather than silently skipping a real escalation, since
+            # a missed escalation is worse than an occasional duplicate.
+            try:
+                search_resp = await client.get(
+                    "/search/issues",
+                    params={
+                        "q": f'repo:{settings.GITHUB_REPO} in:title "[nexus:{fingerprint}]" state:open'
+                    },
+                )
+                search_resp.raise_for_status()
+                existing_url = _find_matching_open_issue_url(search_resp.json(), fingerprint)
+                if existing_url:
+                    return ActionOutcome(
+                        plan=plan,
+                        executed=True,
+                        execution_detail=(
+                            f"An open incident ticket for this exact escalation already "
+                            f"exists: {existing_url}. Not creating a duplicate."
+                        ),
+                        reversible=False,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Idempotency search for fingerprint %s failed (%s); "
+                    "proceeding to create a new ticket rather than skipping "
+                    "the escalation.",
+                    fingerprint, exc,
+                )
+
             resp = await client.post(
                 f"/repos/{settings.GITHUB_REPO}/issues",
                 json={"title": title, "body": body, "labels": ["sentinel-escalation"]},
@@ -219,6 +278,71 @@ class VerifierAgent:
             detail = f"Verification could not run: {exc.__class__.__name__}: {exc}"
 
         return outcome.model_copy(update={"verified": verified, "verification_detail": detail})
+
+
+async def handle_failed_verification(outcome: ActionOutcome, executor: "ExecutorAgent") -> ActionOutcome:
+    """
+    Close the loop when verification finds the original action did NOT
+    resolve the drift.
+
+    BEFORE THIS FIX: a verified=False outcome was a dead end for the
+    CURRENT run — it just sat in memory so the Planner could avoid
+    repeating the exact same action on some future, independently
+    re-detected drift event. Nothing happened right now. rollback()
+    existed on ExecutorAgent but was never called from anywhere in the
+    codebase — fully dead code (confirmed by a full-repo grep before this
+    fix). A verifier that checks but never acts on a failure isn't really
+    closing the Execute -> Verify -> Remember loop; it's just logging.
+
+    THIS FIX: if verification fails —
+      - If the action was reversible (has a rollback_reference): attempt
+        an automatic rollback right now, in this run.
+      - If not reversible: auto-open an incident ticket right now, since
+        opening a ticket is unconditionally safe/low-risk and staying
+        silent is strictly worse than flagging a human.
+
+    The follow-up outcome is attached via `outcome.follow_up` (see
+    schemas.py) and returned as part of the SAME run's result — not
+    deferred to "maybe next time". Bounded to exactly one follow-up
+    level: if the rollback attempt itself fails, that failure is visible
+    in `follow_up.executed=False` for a human to see, but we do not
+    recursively chain further automatic actions from there.
+
+    A no-op (returns `outcome` unchanged) when verified is not False —
+    i.e. verification passed, wasn't run, or the outcome represents
+    no_action.
+    """
+    if outcome.verified is not False:
+        return outcome
+
+    if outcome.reversible and outcome.rollback_reference:
+        logger.info(
+            "Verification failed for %s on %s; attempting automatic rollback (ref=%s).",
+            outcome.plan.action_type.value, outcome.plan.model_urn, outcome.rollback_reference,
+        )
+        follow_up = await executor.rollback(outcome)
+    else:
+        logger.info(
+            "Verification failed for %s on %s and action is not reversible; "
+            "auto-escalating with an incident ticket.",
+            outcome.plan.action_type.value, outcome.plan.model_urn,
+        )
+        escalation_plan = RemediationPlan(
+            model_urn=outcome.plan.model_urn,
+            action_type=RemediationActionType.OPEN_INCIDENT_TICKET,
+            target_urn=outcome.plan.target_urn,
+            rationale=(
+                f"Automatic escalation: '{outcome.plan.action_type.value}' did not "
+                f"resolve the drift (post-action verification failed) and this action "
+                f"type is not reversible. Opening for human review."
+            ),
+            confidence=1.0,
+            risk_level=RiskLevel.LOW,
+            requires_human_approval=False,
+        )
+        follow_up = await executor.execute(escalation_plan)
+
+    return outcome.model_copy(update={"follow_up": follow_up})
 
 
 def get_executor() -> ExecutorAgent:

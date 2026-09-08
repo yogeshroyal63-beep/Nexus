@@ -91,6 +91,32 @@ export default function App() {
     return false
   }
 
+  // FIXED — a real bug found via testing: AgentActionView previously kept
+  // its OWN local copy of the post-approval result (liveResult), completely
+  // disconnected from this component's `result` state. StatusFooter reads
+  // `result` directly and is visible across every tab, so after a human
+  // approved an escalated plan, the footer's "⚠ awaiting approval" warning
+  // would keep showing FOREVER — nothing ever told App.jsx's own state that
+  // the approval happened. Lifting the merge up here means both
+  // AgentActionView and StatusFooter now read from the SAME updated state,
+  // so there's only one source of truth instead of two that can drift apart.
+  //
+  // Merge (not replace) because approveIncident() returns an IncidentRecord,
+  // which lacks the `escalated` / `similar_past_incidents` fields that only
+  // exist on the SentinelRunResult `result` already holds — a naive replace
+  // would silently drop them.
+  //
+  // Explicitly setting `escalated: false` is NOT optional here: object
+  // spread only overwrites keys that EXIST on the source object. Since the
+  // approval response never includes an `escalated` key at all, a plain
+  // `{...prev, ...updated}` merge would leave `escalated: true` untouched
+  // forever, since a missing key never resets an existing one. Reaching
+  // this callback at all means the approve endpoint already succeeded, so
+  // "still needs approval" is definitionally false from this point on.
+  const handleIncidentApproved = useCallback((updated) => {
+    setResult((prev) => ({ ...prev, ...updated, escalated: false }))
+  }, [])
+
   return (
     <ThemeProvider>
       <div className="app-shell">
@@ -127,7 +153,7 @@ export default function App() {
               {activeTab === 'graph' && <LineageGraphView result={result} stage={stage} />}
               {activeTab === 'timeline' && <DriftTimelineView result={result} />}
               {activeTab === 'report' && <RootCauseReportView result={result} />}
-              {activeTab === 'agent' && <AgentActionView result={result} />}
+              {activeTab === 'agent' && <AgentActionView result={result} onApproved={handleIncidentApproved} />}
               {activeTab === 'history' && <IncidentHistoryView />}
             </Suspense>
           </ErrorBoundary>

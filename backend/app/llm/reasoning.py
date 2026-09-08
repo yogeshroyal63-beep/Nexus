@@ -11,11 +11,14 @@ import logging
 from datetime import datetime, timezone
 
 from groq import Groq, GroqError
+from pydantic import ValidationError
 
 from app.config import settings
 from app.models.schemas import RootCauseReport, RootCauseTrace, SuggestedFix
 
 logger = logging.getLogger(__name__)
+
+_VALID_CONFIDENCE_VALUES = {"low", "moderate", "high"}
 
 SYSTEM_PROMPT = """You are the reasoning layer of Nexus, an autonomous developer agent. \
 You will be given a structured RootCauseTrace: statistical drift evidence and a causal \
@@ -45,7 +48,15 @@ def _enforce_grounding(parsed: dict, trace: RootCauseTrace) -> dict:
     allowed_names = {c.node_name for c in trace.isolated_root_causes}
     allowed_urns = {c.node_urn for c in trace.isolated_root_causes} | {trace.model_urn}
 
-    root_causes = [n for n in parsed.get("root_causes", []) if n in allowed_names]
+    # dict.fromkeys(...) dedupes while preserving order — a plain list
+    # comprehension would let the model repeat a name twice in its own
+    # JSON output straight through, which the frontend then uses as a
+    # React list key (RootCauseReportView.jsx), producing a duplicate-key
+    # warning and undefined reconciliation behavior for a purely cosmetic
+    # LLM repetition that carries no additional information anyway.
+    root_causes = list(dict.fromkeys(
+        n for n in parsed.get("root_causes", []) if n in allowed_names
+    ))
     if not root_causes and allowed_names:
         logger.warning("LLM named no valid root causes; falling back to algorithm output.")
         root_causes = sorted(allowed_names)
@@ -54,6 +65,29 @@ def _enforce_grounding(parsed: dict, trace: RootCauseTrace) -> dict:
     fixes = parsed.get("suggested_fixes", [])
     filtered = [f for f in fixes if f.get("target_urn") in allowed_urns]
     parsed["suggested_fixes"] = filtered
+
+    # Confidence normalization: the Planner's ONLY low-confidence safety
+    # gate is an exact string comparison (report.confidence == "low"). The
+    # system prompt asks for exactly "low | moderate | high", but nothing
+    # previously enforced that — a model returning "Low" (wrong case),
+    # "very low", or any other off-vocabulary value would silently bypass
+    # that check entirely, letting the Planner proceed to plan/act on a
+    # report the model itself considered too uncertain to trust. Normalize
+    # case/whitespace, and fail closed to "low" (the conservative,
+    # act-less direction) for anything that still doesn't match one of the
+    # three values the rest of the system understands — never fail open
+    # to "high" on a value we don't recognize.
+    raw_confidence = str(parsed.get("confidence", "")).strip().lower()
+    if raw_confidence not in _VALID_CONFIDENCE_VALUES:
+        logger.warning(
+            "LLM returned unrecognized confidence value %r; defaulting to 'low' "
+            "(fail closed) rather than risk silently bypassing the Planner's "
+            "low-confidence safety gate.",
+            parsed.get("confidence"),
+        )
+        raw_confidence = "low"
+    parsed["confidence"] = raw_confidence
+
     return parsed
 
 
@@ -99,7 +133,17 @@ class LLMReasoningLayer:
                     suggested_fixes=[SuggestedFix(**f) for f in parsed["suggested_fixes"]],
                     raw_trace=trace,
                 )
-            except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            except (json.JSONDecodeError, KeyError, TypeError, ValidationError) as exc:
+                # ValidationError added after finding it slipped through
+                # uncaught: syntactically valid JSON with a schema violation
+                # (e.g. a suggested_fix missing its required 'rationale'
+                # field) raised pydantic.ValidationError, which is NOT a
+                # subclass of any of the other three exception types here.
+                # That let a single malformed field bypass this entire
+                # retry-then-fallback safety net and propagate as an
+                # uncaught 500 error instead of gracefully retrying or
+                # falling back to the deterministic report — defeating the
+                # explicit purpose of this loop.
                 last_error = exc
                 logger.warning("LLM response malformed on attempt %d/%d: %s", attempt + 1, _retries + 1, exc)
             except GroqError as exc:

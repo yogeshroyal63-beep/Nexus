@@ -14,7 +14,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-from app.agents.executor import get_executor, get_verifier
+from app.agents.executor import get_executor, get_verifier, handle_failed_verification
 from app.agents.memory import get_memory_store
 from app.agents.planner import get_planner
 from app.drift.engine import is_drift_alerting, prediction_output_drift
@@ -95,6 +95,12 @@ async def run_nexus(
         # 6: Verify
         verifier = get_verifier()
         outcome = await verifier.verify(outcome, _rerun_drift_check)
+
+        # 6b: Close the loop — a failed verification is no longer a dead
+        # end. Automatic rollback (if reversible) or auto-escalation (if
+        # not) happens in THIS run, not deferred to some future one.
+        outcome = await handle_failed_verification(outcome, executor)
+
         result.outcome = outcome
 
     # 7: Remember

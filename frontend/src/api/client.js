@@ -25,7 +25,7 @@ export const listIncidents = (limit = 50) =>
   request(`/api/incidents?limit=${limit}`)
 
 export const getIncident = (id) =>
-  request(`/api/incidents/${id}`)
+  request(`/api/incidents/${encodeURIComponent(id)}`)
 
 export const approveIncident = (id) =>
-  request(`/api/incidents/${id}/approve`, { method: 'POST' })
+  request(`/api/incidents/${encodeURIComponent(id)}/approve`, { method: 'POST' })

@@ -105,13 +105,14 @@ async def approve_incident(incident_id: str):
         )
 
     from app.agents.coordinator import _rerun_drift_check
-    from app.agents.executor import get_verifier
+    from app.agents.executor import get_verifier, handle_failed_verification
 
     try:
         executor = get_executor()
         outcome = await executor.execute(record.plan)
         verifier = get_verifier()
         outcome = await verifier.verify(outcome, _rerun_drift_check)
+        outcome = await handle_failed_verification(outcome, executor)
         record.outcome = outcome
         await memory.save_incident(record)
         return record
@@ -136,7 +137,54 @@ async def sns_drift_check(request: Request):
     """
     AWS SNS push endpoint — triggers background autonomous run.
     Wire an SNS subscription to POST here for scheduled/event-driven runs.
+
+    FIXED — a real security gap found on review: this endpoint had ZERO
+    authentication. It blindly trusted whatever JSON body arrived and
+    triggered the FULL agentic pipeline — real Bedrock/Groq calls, real
+    GitHub issue creation if write-back is enabled — for anyone who
+    discovered the URL. It was also absent from main.py's RATE_LIMITS
+    entirely, making it simultaneously the least-protected AND most
+    expensive-to-abuse endpoint in the whole API surface. Once deployed,
+    this URL becomes publicly reachable (SNS itself needs to reach it over
+    the internet), so "nobody will guess it" is not a real mitigation.
+
+    THE HONEST TRADE-OFF: this checks a shared secret (query param or
+    header) rather than implementing full AWS SNS message signature
+    verification (which would fetch and cache AWS's signing certificate
+    and validate the RSA-SHA1 signature over SNS's canonical message
+    string). Full signature verification is the textbook-correct approach
+    AWS itself recommends, but is substantial additional complexity this
+    fix doesn't attempt to get exactly right without testing against real
+    SNS traffic. A shared secret is adequate for its actual purpose here —
+    stopping casual/automated abuse of a discovered URL — not airtight
+    against a sophisticated attacker who obtains the secret through some
+    other channel.
+
+    Configure by setting SNS_WEBHOOK_SECRET and subscribing SNS to this
+    URL with the secret appended, e.g.
+    https://your-app/api/sns/drift-check?secret=<SNS_WEBHOOK_SECRET>
+    (SNS calls the exact URL you subscribe, so this requires no special
+    SNS-side configuration). A custom X-Nexus-Webhook-Secret header is
+    also accepted for callers that can set headers.
+
+    Left OPT-IN (enforced only when SNS_WEBHOOK_SECRET is set) rather than
+    required, matching this codebase's existing pattern of demo-friendly
+    defaults (USE_MOCK_DATAHUB, WRITEBACK_ENABLED, etc.) — but a warning is
+    logged on every unauthenticated call so a real deployment doesn't stay
+    silently exposed.
     """
+    if settings.SNS_WEBHOOK_SECRET:
+        provided = request.query_params.get("secret") or request.headers.get("x-nexus-webhook-secret")
+        if provided != settings.SNS_WEBHOOK_SECRET:
+            logger.warning("Rejected /api/sns/drift-check call with missing/incorrect secret.")
+            raise HTTPException(status_code=403, detail="Invalid or missing webhook secret.")
+    else:
+        logger.warning(
+            "/api/sns/drift-check called with SNS_WEBHOOK_SECRET unset — "
+            "this endpoint is unauthenticated. Set SNS_WEBHOOK_SECRET before "
+            "exposing this URL publicly."
+        )
+
     import base64, json as _json
 
     try:

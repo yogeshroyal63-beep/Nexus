@@ -37,6 +37,38 @@ Method (simplified structural intervention):
   statistic. A large reduction means P is doing real causal work; a small
   reduction despite P itself being drifted means P is confounded /
   coincidental.
+
+KNOWN LIMITATION — non-identifiability under near-perfect confounding:
+  If two ancestor nodes are almost perfectly correlated in how they drift
+  (e.g. r ~= 1.0, because a single upstream event shifted both by nearly
+  the same amount), NO observational causal-inference method — this one
+  included — can reliably tell which of the two is doing the causal work.
+  This is a fundamental identifiability limit, not an implementation bug:
+  when two signals are statistically indistinguishable in their
+  relationship to the downstream outcome, confidently blaming one of them
+  is false precision the evidence does not support.
+
+  In that situation this engine deliberately reports NEITHER node as a
+  genuine cause (is_genuine_cause=False for both) rather than guessing.
+  Verified in tests/test_causal_isolator.py::TestConfoundedCoDrift::
+  test_near_perfect_confounding_is_honestly_not_isolated.
+
+  The engine DOES correctly separate confounded nodes when they have
+  differential signal strength — i.e. they share a common component but
+  the true cause has additional drift magnitude the passenger lacks. That
+  is the realistic version of "a deployment event nudged several
+  pipelines, but only one of them actually broke the model", and it is
+  identifiable. See ::test_asymmetric_confounding_correctly_separates_true_cause.
+
+MULTIPLE-TESTING CORRECTION:
+  Testing N upstream ancestor nodes each at a per-test significance
+  threshold inflates the family-wise false-positive rate to
+  1-(1-alpha)^N (34% at N=8 ancestors, alpha=0.05). Before any node is
+  eligible for the (expensive) intervention check below, ALL ancestor
+  p-values are corrected jointly via Benjamini-Hochberg FDR control (see
+  app/causal/fdr.py). A node whose raw p-value looked significant in
+  isolation but does not survive FDR correction is excluded — it was
+  noise, not signal to investigate.
 """
 from __future__ import annotations
 
@@ -47,6 +79,7 @@ import networkx as nx
 import numpy as np
 
 from app.config import settings
+from app.causal.fdr import benjamini_hochberg, expected_false_positive_rate
 from app.drift.engine import ks_test_drift, is_drift_alerting
 from app.lineage.dag import get_node, hops_from, path_to_model, upstream_nodes
 from app.models.schemas import (
@@ -202,6 +235,8 @@ def isolate_root_causes(
     model_urn: str,
     prediction_drift: PredictionDriftResult,
     upstream_samples: dict[str, FeatureSample],
+    downstream_baseline: np.ndarray | None = None,
+    downstream_current: np.ndarray | None = None,
 ) -> RootCauseTrace:
     """
     Main entry point. `upstream_samples` maps node_urn -> baseline/current
@@ -211,22 +246,65 @@ def isolate_root_causes(
     generator; in production it would come from a feature store /
     warehouse query per node.
 
-    All ancestor nodes with samples are used jointly in the intervention
-    regression (see `_fit_linear_weights` / `_simulate_holding_parent_at_baseline`),
-    so a raw dataset and the feature table derived from it are both tested
-    as candidates and can disambiguate each other via `confounded_with`.
-    """
-    candidates: list[CausalCandidate] = []
+    `downstream_baseline` / `downstream_current` are the model's REAL
+    prediction arrays (same ones prediction_drift was computed from).
+    These are used directly as the intervention regression's target — NOT
+    reconstructed from a proxy derived from the ancestor samples.
 
+    WHY THIS MATTERS (fixed after a synthetic-test finding — see
+    tests/test_causal_isolator.py history / git blame for the discovery):
+    An earlier version of this function reconstructed a "downstream
+    proxy" as literally the mean of the ancestor nodes' own current/
+    baseline values, because real prediction arrays weren't threaded
+    through. That made the regression tautological — downstream was an
+    exact deterministic function of the very ancestors being tested for
+    causing it, with near-zero residual. That degeneracy caused a
+    residual-leakage artifact where holding one parent at baseline didn't
+    fully remove its influence from the counterfactual, because "residual
+    noise" ended up reabsorbing roughly half of that parent's own signal.
+    The result: intervention_delta became insensitive to genuine
+    differences in how strongly two confounded parents actually drove the
+    outcome. Passing the real, independently-generated prediction array
+    (which depends on the ancestors only through the MODEL's actual
+    logic, with real irreducible noise) removes the degeneracy and
+    restores correct differential attribution. If callers omit these
+    arrays (e.g. no live prediction log available), we fall back to the
+    old mean-based proxy with a logged warning — the result is a strictly
+    weaker approximation in that case, not a crash.
+
+    TWO-PASS DESIGN:
+
+    Pass 1 — Statistical screening with multiple-testing correction.
+      Every ancestor node gets a KS-test p-value. Testing N nodes
+      independently at raw alpha=0.05 inflates the family-wise false
+      positive rate to 1-(1-0.05)^N (34% at N=8) — see app/causal/fdr.py
+      for the full explanation. We run Benjamini-Hochberg across the
+      WHOLE family of ancestor p-values before deciding which nodes are
+      even eligible to be considered a cause. A node whose raw p-value
+      looked "significant" in isolation but doesn't survive FDR
+      correction is excluded from the expensive causal step entirely —
+      it was noise, not signal.
+
+    Pass 2 — Causal intervention (only on FDR survivors).
+      For nodes that passed Pass 1, run the bootstrap counterfactual
+      intervention check against the REAL downstream signal to
+      distinguish genuine upstream causes from nodes that merely
+      co-drifted alongside a real cause.
+
+    All ancestor nodes with samples are used jointly in the intervention
+    regression, so a raw dataset and the feature table derived from it are
+    both tested as candidates and can disambiguate each other via
+    `confounded_with`.
+    """
     ancestors = upstream_nodes(dag, model_urn)
 
+    # ── Pass 1: compute raw drift stats for every ancestor with samples ──
+    raw_results: dict[str, FeatureDriftResult] = {}
     for urn in ancestors:
         if urn not in upstream_samples:
             continue
         sample = upstream_samples[urn]
-        node = get_node(dag, urn)
-
-        drift_result: FeatureDriftResult = ks_test_drift(
+        raw_results[urn] = ks_test_drift(
             baseline=sample.baseline,
             current=sample.current,
             node_urn=urn,
@@ -235,8 +313,60 @@ def isolate_root_causes(
             current_window="last_7d",
         )
 
-        if not is_drift_alerting(drift_result):
-            continue  # not drifted at all -> cannot be a cause
+    tested_urns = list(raw_results.keys())
+    n_tested = len(tested_urns)
+
+    # ── FDR correction across the WHOLE family of ancestor tests ────────
+    # p_value can be None only if a caller bypasses ks_test_drift (it
+    # never does today); guard anyway so a None doesn't silently break BH.
+    p_values = [raw_results[u].p_value if raw_results[u].p_value is not None else 1.0 for u in tested_urns]
+    fdr_results = benjamini_hochberg(p_values, q=settings.KS_PVALUE_ALERT_THRESHOLD)
+    survived_fdr: dict[str, bool] = {
+        urn: fdr_results[i].rejected for i, urn in enumerate(tested_urns)
+    }
+    adjusted_p: dict[str, float] = {
+        urn: fdr_results[i].adjusted_p_value for i, urn in enumerate(tested_urns)
+    }
+
+    uncorrected_risk = expected_false_positive_rate(n_tested, alpha=settings.KS_PVALUE_ALERT_THRESHOLD)
+
+    # ── Pass 2: intervention check, only for FDR survivors that also ────
+    #            clear the raw alerting bar (drift magnitude, not just
+    #            statistical significance — a huge sample can make a
+    #            trivial shift "significant" without it mattering).
+    candidates: list[CausalCandidate] = []
+
+    eligible_urns = [
+        u for u in tested_urns
+        if survived_fdr[u] and is_drift_alerting(raw_results[u])
+    ]
+
+    for urn in tested_urns:
+        sample = upstream_samples[urn]
+        node = get_node(dag, urn)
+        drift_result = raw_results[urn]
+
+        if urn not in eligible_urns:
+            # Excluded either by FDR correction (likely noise) or by not
+            # clearing the drift-magnitude bar. Still recorded for
+            # transparency in candidates_examined, but skips the costly
+            # bootstrap — it cannot be a genuine cause either way.
+            candidates.append(
+                CausalCandidate(
+                    node_urn=urn,
+                    node_name=node.name,
+                    hops_from_model=hops_from(dag, urn, model_urn),
+                    drift_result=drift_result,
+                    is_genuine_cause=False,
+                    fdr_adjusted_p_value=adjusted_p[urn],
+                    survived_fdr_correction=survived_fdr[urn],
+                    intervention_delta=0.0,
+                    intervention_delta_lower_ci=0.0,
+                    intervention_delta_upper_ci=0.0,
+                    confounded_with=[],
+                )
+            )
+            continue
 
         hops = hops_from(dag, urn, model_urn)
 
@@ -248,7 +378,7 @@ def isolate_root_causes(
         intervention_delta = 0.0
         confounded_with: list[str] = []
 
-        other_ancestor_urns = [a for a in ancestors if a != urn and a in upstream_samples]
+        other_ancestor_urns = [a for a in eligible_urns if a != urn]
 
         if other_ancestor_urns:
             other_parents_current = {
@@ -257,18 +387,37 @@ def isolate_root_causes(
             other_parents_baseline = {
                 a: upstream_samples[a].baseline for a in other_ancestor_urns
             }
-            other_parents_baseline["__this_parent__"] = sample.baseline
 
-            # Use the model's prediction values as the downstream signal we're
-            # trying to explain. We approximate a baseline "prediction proxy"
-            # as a weighted sum of ancestor baselines for the regression fit,
-            # since raw historical predictions aren't always available offline.
             proxy_weights_inputs = dict(other_parents_baseline)
             proxy_weights_inputs["__this_parent__"] = sample.baseline
-            n_ref = min(len(v) for v in proxy_weights_inputs.values())
-            downstream_baseline_proxy = np.mean(
-                [v[:n_ref] for v in proxy_weights_inputs.values()], axis=0
-            )
+
+            using_real_downstream = downstream_baseline is not None and downstream_current is not None
+            if using_real_downstream:
+                # Real, independently-generated downstream signal — has
+                # genuine irreducible noise and a real (possibly
+                # nonlinear-in-truth, linearly-approximated-here)
+                # dependence on each parent. No tautological degeneracy.
+                n_ref = min(len(downstream_baseline), *(len(v) for v in proxy_weights_inputs.values()))
+                downstream_baseline_proxy = np.asarray(downstream_baseline[:n_ref])
+                # Trim regression inputs to match n_ref for a well-posed fit.
+                proxy_weights_inputs = {k: v[:n_ref] for k, v in proxy_weights_inputs.items()}
+            else:
+                # Fallback: no live prediction array supplied. Reconstruct
+                # a mean-based proxy as before — strictly weaker (see
+                # module docstring "WHY THIS MATTERS" for the degeneracy
+                # this can introduce), but keeps the function usable
+                # without a live prediction log.
+                logger.warning(
+                    "No real downstream prediction array supplied for %s; "
+                    "falling back to mean-based proxy. intervention_delta "
+                    "for confounded ancestors may be less discriminating "
+                    "in this mode — see isolate_root_causes docstring.",
+                    urn,
+                )
+                n_ref = min(len(v) for v in proxy_weights_inputs.values())
+                downstream_baseline_proxy = np.mean(
+                    [v[:n_ref] for v in proxy_weights_inputs.values()], axis=0
+                )
 
             try:
                 weights = _fit_linear_weights(downstream_baseline_proxy, proxy_weights_inputs)
@@ -276,11 +425,15 @@ def isolate_root_causes(
                     min(len(v) for v in other_parents_current.values()) if other_parents_current else len(sample.current),
                     len(sample.current),
                 )
-                downstream_current_actual = np.mean(
-                    [sample.current[:n_cur]]
-                    + [v[:n_cur] for v in other_parents_current.values()],
-                    axis=0,
-                )
+                if using_real_downstream:
+                    n_cur = min(n_cur, len(downstream_current))
+                    downstream_current_actual = np.asarray(downstream_current[:n_cur])
+                else:
+                    downstream_current_actual = np.mean(
+                        [sample.current[:n_cur]]
+                        + [v[:n_cur] for v in other_parents_current.values()],
+                        axis=0,
+                    )
                 # --- Bootstrap the counterfactual, don't trust one draw ------
                 # A single random baseline resample could overstate or
                 # understate the effect by chance. Resample N times, each
@@ -336,8 +489,9 @@ def isolate_root_causes(
                 intervention_delta_lower_ci = intervention_delta
                 intervention_delta_upper_ci = intervention_delta
         else:
-            # Only one drifted ancestor found -> no confounding possible,
-            # its own drift statistic stands in directly as the intervention effect.
+            # Only one FDR-surviving drifted ancestor found -> no confounding
+            # possible, its own drift statistic stands in directly as the
+            # intervention effect.
             intervention_delta = drift_result.statistic
             intervention_delta_lower_ci = intervention_delta
             intervention_delta_upper_ci = intervention_delta
@@ -354,6 +508,8 @@ def isolate_root_causes(
                 hops_from_model=hops,
                 drift_result=drift_result,
                 is_genuine_cause=is_genuine_cause,
+                fdr_adjusted_p_value=adjusted_p[urn],
+                survived_fdr_correction=True,
                 intervention_delta=round(intervention_delta, 4),
                 intervention_delta_lower_ci=round(intervention_delta_lower_ci, 4),
                 intervention_delta_upper_ci=round(intervention_delta_upper_ci, 4),
@@ -374,4 +530,5 @@ def isolate_root_causes(
         candidates_examined=candidates,
         isolated_root_causes=isolated,
         graph_path=graph_path,
+        fdr_uncorrected_false_positive_risk=round(uncorrected_risk, 4),
     )

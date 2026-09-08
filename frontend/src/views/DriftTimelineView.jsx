@@ -10,6 +10,7 @@ const SEVERITY_COLOR = {
   moderate: 'var(--signal-trace)',
   high: 'var(--signal-critical)',
   critical: 'var(--signal-critical)',
+  insufficient_data: 'var(--signal-warn)',
 }
 
 export default function DriftTimelineView({ result }) {
@@ -43,8 +44,23 @@ export default function DriftTimelineView({ result }) {
         <div className="drift-stats mono">
           <Stat label="method" value={pred.method} />
           <Stat label="KS statistic" value={pred.statistic.toFixed(4)} />
-          <Stat label="p-value" value={pred.p_value < 0.0001 ? pred.p_value.toExponential(2) : pred.p_value.toFixed(4)} />
+          <Stat
+            label="p-value"
+            value={
+              pred.p_value === null || pred.p_value === undefined
+                ? 'n/a'
+                : pred.p_value < 0.0001
+                  ? pred.p_value.toExponential(2)
+                  : pred.p_value.toFixed(4)
+            }
+          />
         </div>
+        {pred.severity === 'insufficient_data' && (
+          <p className="drift-note mono" style={{ color: 'var(--signal-warn)' }}>
+            ⚠ Not enough samples in this window to run a reliable drift test —
+            this may indicate a data outage rather than actual model drift.
+          </p>
+        )}
       </section>
 
       <section className="drift-card">

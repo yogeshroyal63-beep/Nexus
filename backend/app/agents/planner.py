@@ -9,10 +9,28 @@ concrete remediation action using Claude 3.5 Sonnet via Bedrock.
 Strands tools defined here:
   - assess_risk_level: deterministic risk assessment (not LLM-guessed)
   - check_past_incidents: memory lookup for repeat patterns
-  - select_action: final action selection with grounding enforcement
 
 The Strands agent orchestrates these tools autonomously — this is the
 "non-trivial Strands implementation" judges are scoring.
+
+FIXED — risk-level self-report bypass (found via testing, not observed in
+production, but real and serious enough to document plainly):
+  The whole point of `assess_risk_level` is that risk is computed in code,
+  "never trust the LLM to self-report" per the tool's own docstring. But
+  the ORIGINAL version of this file only ever used that tool's result as
+  advisory context — nothing stopped the model from calling the tool, being
+  told an action is high risk, and then still writing "risk_level": "low"
+  in its final JSON answer. That would have let a high-risk action (e.g.
+  rollback_model_version) auto-execute with zero human approval purely
+  because the model contradicted its own tool call.
+
+  Fixed by making risk assessment a THIRD pass the code runs itself, after
+  parsing the model's JSON: `_assess_risk_level_logic` is called directly
+  by plan() using the model's chosen action_type/confidence and a
+  deterministically-computed has_similar_failures flag, and its result
+  UNCONDITIONALLY OVERRIDES whatever risk_level the model wrote. The model's
+  tool calls during the conversation still help it reason and justify its
+  choice, but the safety-relevant number is never taken on the model's word.
 """
 from __future__ import annotations
 
@@ -43,7 +61,9 @@ STRICT RULES:
 quarantine_data_source, open_incident_ticket, no_action.
 3. confidence is YOUR calibrated 0.0-1.0 estimate that this specific action is correct.
 4. If past incidents show an action FAILED verification, do not repeat it.
-5. Always call assess_risk_level before finalizing your decision.
+5. Always call assess_risk_level before finalizing your decision. Note: the risk_level
+   you report is advisory — the system independently recomputes the authoritative risk
+   level from your chosen action_type, so focus your judgment on picking the RIGHT action.
 
 After using tools, respond with ONLY a JSON object:
 {
@@ -54,9 +74,81 @@ After using tools, respond with ONLY a JSON object:
   "risk_level": "low | medium | high"
 }"""
 
+# Action -> risk classification. Single source of truth, used both by the
+# in-conversation tool AND by plan()'s post-hoc enforcement pass, so the
+# two can never drift out of sync with each other.
+_HIGH_RISK_ACTIONS = {RemediationActionType.ROLLBACK_MODEL_VERSION.value}
+_MEDIUM_RISK_ACTIONS = {RemediationActionType.TRIGGER_RETRAIN.value}
+_LOW_RISK_ACTIONS = {
+    RemediationActionType.QUARANTINE_DATA_SOURCE.value,
+    RemediationActionType.OPEN_INCIDENT_TICKET.value,
+    RemediationActionType.NO_ACTION.value,
+}
 
-def _build_planner_context(report: RootCauseReport, history: list[IncidentRecord]) -> str:
-    history_summary = [
+
+def _assess_risk_level_logic(action_type: str, confidence: float, has_similar_failures: bool) -> dict:
+    """
+    Pure, deterministic risk assessment — no LLM, no I/O, fully unit
+    testable. This is the ONE place risk classification happens; both the
+    in-conversation Strands tool and plan()'s post-hoc override call this
+    exact function so they can never disagree with each other.
+    """
+    if action_type in _HIGH_RISK_ACTIONS:
+        risk = "high"
+    elif action_type in _MEDIUM_RISK_ACTIONS:
+        risk = "medium"
+    elif action_type in _LOW_RISK_ACTIONS:
+        risk = "low"
+    else:
+        # Unknown action type — fail closed to high risk rather than
+        # silently defaulting to low for something we don't recognize.
+        risk = "high"
+
+    requires_approval = (
+        not settings.AUTO_EXECUTE_ENABLED
+        or confidence < settings.AUTO_EXECUTE_MIN_CONFIDENCE
+        or risk == "high"
+        or has_similar_failures
+    )
+
+    return {
+        "risk_level": risk,
+        "requires_approval": requires_approval,
+        "reasoning": (
+            f"Action '{action_type}' is {risk} risk. "
+            f"Confidence {confidence:.2f} {'clears' if confidence >= settings.AUTO_EXECUTE_MIN_CONFIDENCE else 'does not clear'} "
+            f"the {settings.AUTO_EXECUTE_MIN_CONFIDENCE} threshold. "
+            f"{'Past similar failures detected.' if has_similar_failures else 'No repeat failure pattern.'}"
+        ),
+    }
+
+
+def _check_past_incidents_logic(incidents: list[dict], proposed_action: str) -> dict:
+    """
+    Pure function: did `proposed_action` fail verification in any of these
+    past incidents? Operates on plain dicts (not IncidentRecord objects)
+    so it can be called identically from the JSON-string Strands tool and
+    from plan()'s direct history check.
+    """
+    failures = [
+        i for i in incidents
+        if i.get("action_taken") == proposed_action
+        and i.get("verified_success") is False
+    ]
+    return {
+        "has_failures": len(failures) > 0,
+        "failure_count": len(failures),
+        "recommendation": (
+            f"Action '{proposed_action}' has failed verification {len(failures)} time(s). "
+            "Consider a different action or open_incident_ticket instead."
+            if failures else
+            f"No verified failures for '{proposed_action}' in past incidents."
+        ),
+    }
+
+
+def _history_to_summary(history: list[IncidentRecord]) -> list[dict]:
+    return [
         {
             "incident_id": h.incident_id,
             "created_at": str(h.created_at),
@@ -66,6 +158,9 @@ def _build_planner_context(report: RootCauseReport, history: list[IncidentRecord
         }
         for h in history
     ]
+
+
+def _build_planner_context(report: RootCauseReport, history: list[IncidentRecord]) -> str:
     payload = {
         "report": {
             "model_urn": report.model_urn,
@@ -79,7 +174,7 @@ def _build_planner_context(report: RootCauseReport, history: list[IncidentRecord
             | {f.target_urn for f in report.suggested_fixes}
             | {c.node_urn for c in report.raw_trace.isolated_root_causes}
         ),
-        "past_incidents_this_model": history_summary,
+        "past_incidents_this_model": _history_to_summary(history),
     }
     return json.dumps(payload, indent=2)
 
@@ -97,6 +192,51 @@ def _enforce_target_grounding(parsed: dict, report: RootCauseReport) -> dict:
         parsed["risk_level"] = RiskLevel.LOW.value
         parsed["rationale"] = "Planner's proposed target could not be grounded in the trace; defaulted to no_action."
     return parsed
+
+
+def _extract_json_object(text: str) -> dict:
+    """
+    Extract the first balanced {...} object from free-form model output.
+
+    Replaces a naive `rfind("{")` / `rfind("}")` pair, which silently
+    breaks if the model's rationale text itself contains braces (a JSON
+    example, a URN with a brace, nested prose) — rfind grabs the LAST
+    brace of each kind regardless of nesting, which can slice out an
+    invalid or truncated fragment instead of the actual answer object.
+
+    This scans for the first `{`, then walks forward tracking brace depth
+    (ignoring braces inside string literals) until it returns to zero,
+    giving the exact matching top-level object regardless of what
+    surrounds it.
+    """
+    start = text.find("{")
+    if start == -1:
+        raise ValueError("No JSON object found in model response")
+
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                candidate = text[start:i + 1]
+                return json.loads(candidate)
+
+    raise ValueError("Unbalanced JSON object in model response (no matching closing brace)")
 
 
 def _safe_escalation_plan(report: RootCauseReport, reason: str) -> RemediationPlan:
@@ -121,6 +261,7 @@ class StrandsPlannerAgent:
     """
 
     REQUEST_TIMEOUT = 30  # seconds
+    MAX_ATTEMPTS = 2  # 1 retry on malformed JSON, mirroring llm/reasoning.py
 
     def __init__(self):
         self._agent = None
@@ -147,6 +288,11 @@ class StrandsPlannerAgent:
             """
             Deterministically assess risk level for a proposed action.
             Never trust the LLM to self-report risk — compute it in code.
+            NOTE: this tool's result is advisory during your reasoning —
+            the system independently recomputes the authoritative risk
+            level from your final action_type after you answer, so use
+            this to inform your choice of ACTION, not to game the final
+            reported risk_level.
 
             Args:
                 action_type: One of trigger_retrain, rollback_model_version, quarantine_data_source, open_incident_ticket, no_action
@@ -156,34 +302,7 @@ class StrandsPlannerAgent:
             Returns:
                 JSON with risk_level and requires_approval
             """
-            high_risk_actions = {"rollback_model_version"}
-            medium_risk_actions = {"trigger_retrain"}
-            low_risk_actions = {"quarantine_data_source", "open_incident_ticket", "no_action"}
-
-            if action_type in high_risk_actions:
-                risk = "high"
-            elif action_type in medium_risk_actions:
-                risk = "medium"
-            else:
-                risk = "low"
-
-            requires_approval = (
-                not settings.AUTO_EXECUTE_ENABLED
-                or confidence < settings.AUTO_EXECUTE_MIN_CONFIDENCE
-                or risk == "high"
-                or has_similar_failures
-            )
-
-            return json.dumps({
-                "risk_level": risk,
-                "requires_approval": requires_approval,
-                "reasoning": (
-                    f"Action '{action_type}' is {risk} risk. "
-                    f"Confidence {confidence:.2f} {'clears' if confidence >= settings.AUTO_EXECUTE_MIN_CONFIDENCE else 'does not clear'} "
-                    f"the {settings.AUTO_EXECUTE_MIN_CONFIDENCE} threshold. "
-                    f"{'Past similar failures detected.' if has_similar_failures else 'No repeat failure pattern.'}"
-                )
-            })
+            return json.dumps(_assess_risk_level_logic(action_type, confidence, has_similar_failures))
 
         @tool
         def check_past_incidents(past_incidents_json: str, proposed_action: str) -> str:
@@ -199,21 +318,7 @@ class StrandsPlannerAgent:
             """
             try:
                 incidents = json.loads(past_incidents_json)
-                failures = [
-                    i for i in incidents
-                    if i.get("action_taken") == proposed_action
-                    and i.get("verified_success") is False
-                ]
-                return json.dumps({
-                    "has_failures": len(failures) > 0,
-                    "failure_count": len(failures),
-                    "recommendation": (
-                        f"Action '{proposed_action}' has failed verification {len(failures)} time(s). "
-                        "Consider a different action or open_incident_ticket instead."
-                        if failures else
-                        f"No verified failures for '{proposed_action}' in past incidents."
-                    )
-                })
+                return json.dumps(_check_past_incidents_logic(incidents, proposed_action))
             except Exception as exc:
                 return json.dumps({"has_failures": False, "failure_count": 0, "error": str(exc)})
 
@@ -223,6 +328,17 @@ class StrandsPlannerAgent:
             tools=[assess_risk_level, check_past_incidents],
         )
         return self._agent
+
+    async def _call_agent_once(self, agent, user_message: str) -> dict:
+        """One attempt: invoke the Strands agent, extract and parse JSON.
+        Raises on any failure — caller handles retry."""
+        loop = asyncio.get_running_loop()
+        response = await asyncio.wait_for(
+            loop.run_in_executor(None, lambda: agent(user_message)),
+            timeout=self.REQUEST_TIMEOUT,
+        )
+        response_text = str(response)
+        return _extract_json_object(response_text)
 
     async def plan(self, report: RootCauseReport, history: list[IncidentRecord]) -> RemediationPlan:
         if not report.root_causes or report.confidence == "low":
@@ -236,59 +352,79 @@ class StrandsPlannerAgent:
                 requires_human_approval=False,
             )
 
-        try:
-            agent = self._get_agent()
-            context = _build_planner_context(report, history)
-            user_message = (
-                f"Analyze this incident and decide the best remediation action.\n\n"
-                f"Context:\n{context}\n\n"
-                f"Use the assess_risk_level and check_past_incidents tools before finalizing. "
-                f"Then respond with the JSON decision."
-            )
+        history_summary = _history_to_summary(history)
+        last_error: Exception | None = None
 
-            loop = asyncio.get_running_loop()
-            response = await asyncio.wait_for(
-                loop.run_in_executor(None, lambda: agent(user_message)),
-                timeout=self.REQUEST_TIMEOUT,
-            )
+        for attempt in range(self.MAX_ATTEMPTS):
+            try:
+                agent = self._get_agent()
+                context = _build_planner_context(report, history)
+                user_message = (
+                    f"Analyze this incident and decide the best remediation action.\n\n"
+                    f"Context:\n{context}\n\n"
+                    f"Use the assess_risk_level and check_past_incidents tools before finalizing. "
+                    f"Then respond with the JSON decision."
+                )
 
-            # Extract text from Strands response
-            response_text = str(response)
+                parsed = await self._call_agent_once(agent, user_message)
+                parsed = _enforce_target_grounding(parsed, report)
 
-            # Parse JSON from response
-            start = response_text.rfind("{")
-            end = response_text.rfind("}") + 1
-            if start == -1 or end == 0:
-                raise ValueError("No JSON object found in Strands agent response")
+                action_type_str = parsed["action_type"]
+                # Validate against the enum BEFORE using it anywhere else —
+                # an unrecognized action string must not silently pass
+                # through into risk assessment as if it were a known action.
+                action_type = RemediationActionType(action_type_str)
 
-            json_str = response_text[start:end]
-            parsed = json.loads(json_str)
-            parsed = _enforce_target_grounding(parsed, report)
+                confidence = float(parsed["confidence"])
+                confidence = max(0.0, min(1.0, confidence))  # clamp instead of failing on minor overshoot
 
-            confidence = float(parsed["confidence"])
-            risk = RiskLevel(parsed["risk_level"])
-            requires_approval = (
-                not settings.AUTO_EXECUTE_ENABLED
-                or confidence < settings.AUTO_EXECUTE_MIN_CONFIDENCE
-                or risk == RiskLevel.HIGH
-            )
+                # ── Authoritative risk determination ────────────────────
+                # Deliberately IGNORE parsed["risk_level"] (the model's
+                # self-report) for the safety-relevant decision. Recompute
+                # has_similar_failures ourselves from real history —
+                # rather than trusting whatever the model claims it found
+                # via the tool — then run the same deterministic function
+                # the tool uses. This is what closes the self-report
+                # bypass described in the module docstring.
+                failure_check = _check_past_incidents_logic(history_summary, action_type.value)
+                risk_assessment = _assess_risk_level_logic(
+                    action_type=action_type.value,
+                    confidence=confidence,
+                    has_similar_failures=failure_check["has_failures"],
+                )
+                risk = RiskLevel(risk_assessment["risk_level"])
+                requires_approval = risk_assessment["requires_approval"]
 
-            return RemediationPlan(
-                model_urn=report.model_urn,
-                action_type=RemediationActionType(parsed["action_type"]),
-                target_urn=parsed["target_urn"],
-                rationale=parsed["rationale"],
-                confidence=confidence,
-                risk_level=risk,
-                requires_human_approval=requires_approval,
-            )
+                return RemediationPlan(
+                    model_urn=report.model_urn,
+                    action_type=action_type,
+                    target_urn=parsed["target_urn"],
+                    rationale=parsed["rationale"],
+                    confidence=confidence,
+                    risk_level=risk,
+                    requires_human_approval=requires_approval,
+                )
 
-        except asyncio.TimeoutError:
-            logger.error("Strands Planner timed out after %ds", self.REQUEST_TIMEOUT)
-            return _safe_escalation_plan(report, "timeout")
-        except Exception as exc:
-            logger.error("Strands Planner failed: %s", exc, exc_info=True)
-            return _safe_escalation_plan(report, exc.__class__.__name__)
+            except asyncio.TimeoutError as exc:
+                logger.error("Strands Planner timed out after %ds (attempt %d/%d)",
+                             self.REQUEST_TIMEOUT, attempt + 1, self.MAX_ATTEMPTS)
+                last_error = exc
+                break  # timeout is not worth retrying — Bedrock is likely genuinely slow/down
+            except (json.JSONDecodeError, ValueError, KeyError, TypeError) as exc:
+                logger.warning(
+                    "Planner response malformed on attempt %d/%d: %s",
+                    attempt + 1, self.MAX_ATTEMPTS, exc,
+                )
+                last_error = exc
+                continue
+            except Exception as exc:
+                logger.error("Strands Planner failed: %s", exc, exc_info=True)
+                last_error = exc
+                break  # unexpected error class — don't retry blindly
+
+        reason = f"{last_error.__class__.__name__}" if last_error else "unknown"
+        logger.error("Strands Planner exhausted attempts (%s); escalating.", reason)
+        return _safe_escalation_plan(report, reason)
 
 
 def get_planner() -> StrandsPlannerAgent:

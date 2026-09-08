@@ -27,6 +27,18 @@ class Settings(BaseSettings):
     GITHUB_REPO: str = ""   # "owner/repo"
     WRITEBACK_ENABLED: bool = False
 
+    # --- SNS webhook authentication --------------------------------------------
+    # Shared-secret check for /api/sns/drift-check, NOT full AWS SNS message
+    # signature verification. See routes.py's sns_drift_check docstring for
+    # the honest trade-off this represents. Empty by default so the demo
+    # works out of the box without extra setup — set this in any deployment
+    # where the endpoint URL becomes publicly reachable, since without it
+    # the endpoint is both unauthenticated AND (before this fix) unrate-
+    # limited, letting anyone who finds the URL trigger the full agentic
+    # pipeline (real LLM calls, real GitHub issue creation if write-back is
+    # enabled) on demand.
+    SNS_WEBHOOK_SECRET: str = ""
+
     # --- Remediation thresholds ----------------------------------------------
     AUTO_EXECUTE_MIN_CONFIDENCE: float = 0.75
     AUTO_EXECUTE_ENABLED: bool = True
@@ -35,6 +47,7 @@ class Settings(BaseSettings):
     MEMORY_BACKEND: str = "local"        # "local" | "dynamodb"
     MEMORY_LOCAL_PATH: str = "data/nexus_incidents.json"
     DYNAMODB_TABLE: str = "nexus-incidents"
+    CLAIM_STALE_AFTER_SECONDS: int = 300  # 5 min — see memory.py claim_incident_for_approval
 
     # --- Drift thresholds ----------------------------------------------------
     KS_PVALUE_ALERT_THRESHOLD: float = 0.05
@@ -43,6 +56,7 @@ class Settings(BaseSettings):
     PSI_HIGH_THRESHOLD: float = 0.3
     EMBEDDING_COSINE_DRIFT_THRESHOLD: float = 0.15
     INTERVENTION_DELTA_MIN: float = 0.05
+    MIN_SAMPLE_SIZE_FOR_DRIFT_TEST: int = 20  # below this, KS/PSI are statistically unreliable
 
     # --- App -----------------------------------------------------------------
     USE_MOCK_DATAHUB: bool = True

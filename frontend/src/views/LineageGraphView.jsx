@@ -17,6 +17,81 @@ const LAYOUT = {
   'urn:li:mlModelDeployment:(demo,fraud_model_v3_prod)': { x: 880, y: 130 },
 }
 
+const COLUMN_WIDTH = 300
+const ROW_HEIGHT = 130
+
+/**
+ * Auto-layout fallback for any node not in the hand-placed LAYOUT map above.
+ *
+ * THE GAP THIS CLOSES: the original code fell back to a bare `{ x: 0, y: 0 }`
+ * for any URN not in LAYOUT — meaning every unmatched node rendered at the
+ * exact same point, completely overlapping and unreadable. LAYOUT is keyed
+ * to the ONE demo model, but the backend API fully supports an arbitrary
+ * model_urn via /api/investigate?model_urn=... — this frontend is currently
+ * only ever driven with the one hardcoded demo URN (see App.jsx's MODEL_URN
+ * constant), so the overlap can't be hit through the deployed demo UI today,
+ * but it's a real, foreseeable break the moment that changes, and silently
+ * producing an unreadable graph instead of a clear layout is exactly the
+ * class of "only works for the one happy path" gap this whole audit has
+ * been about.
+ *
+ * Computes each node's column as its longest-path distance (in hops) from
+ * any source node (no incoming edges) — i.e. the same "how many hops from
+ * the root" concept the backend already uses for hops_from_model — and its
+ * row as its index within that column, so nodes fan out into a readable
+ * grid instead of stacking. Column/row spacing matches LAYOUT's own
+ * conventions (300px / 130px) so a graph mixing hand-placed and
+ * auto-computed nodes still looks visually consistent.
+ *
+ * Pure function, no React/ReactFlow dependency, so it's directly unit
+ * testable without mounting any component.
+ */
+export function computeAutoLayout(nodeUrns, edges) {
+  const children = new Map()
+  const hasIncoming = new Set()
+  for (const urn of nodeUrns) children.set(urn, [])
+  for (const e of edges) {
+    if (children.has(e.upstream_urn)) children.get(e.upstream_urn).push(e.downstream_urn)
+    hasIncoming.add(e.downstream_urn)
+  }
+
+  const depth = new Map()
+  const visiting = new Set()
+
+  function longestPathFrom(urn) {
+    if (depth.has(urn)) return depth.get(urn)
+    if (visiting.has(urn)) return 0 // cycle guard — never infinite-loop on malformed input
+    visiting.add(urn)
+    const kids = children.get(urn) || []
+    const result = kids.length === 0 ? 0 : 1 + Math.max(...kids.map(longestPathFrom))
+    visiting.delete(urn)
+    depth.set(urn, result)
+    return result
+  }
+
+  const sources = nodeUrns.filter((urn) => !hasIncoming.has(urn))
+  const roots = sources.length > 0 ? sources : nodeUrns // degenerate: no clear source, treat all as roots
+  for (const urn of roots) longestPathFrom(urn)
+  for (const urn of nodeUrns) if (!depth.has(urn)) longestPathFrom(urn)
+
+  // Column = distance from a source (root), NOT distance-to-sink, so a
+  // longer causal chain reads left-to-right the same direction as the
+  // hand-placed LAYOUT (raw data -> features -> model -> deployment).
+  const maxDepth = Math.max(0, ...depth.values())
+  const columnOf = new Map()
+  for (const urn of nodeUrns) columnOf.set(urn, maxDepth - depth.get(urn))
+
+  const rowCounters = new Map()
+  const positions = new Map()
+  for (const urn of nodeUrns) {
+    const col = columnOf.get(urn)
+    const row = rowCounters.get(col) || 0
+    rowCounters.set(col, row + 1)
+    positions.set(urn, { x: col * COLUMN_WIDTH, y: row * ROW_HEIGHT })
+  }
+  return positions
+}
+
 export function nodeStatus(urn, result) {
   if (!result) return 'idle'
   const trace = result.trace
@@ -37,8 +112,12 @@ export default function LineageGraphView({ result, stage }) {
   const { nodes, edges } = useMemo(() => {
     if (!graph) return { nodes: [], edges: [] }
 
+    const allUrns = graph.nodes.map((n) => n.urn)
+    const unknownUrns = allUrns.filter((urn) => !LAYOUT[urn])
+    const autoPositions = unknownUrns.length > 0 ? computeAutoLayout(allUrns, graph.edges) : new Map()
+
     const rfNodes = graph.nodes.map((n) => {
-      const pos = LAYOUT[n.urn] ?? { x: 0, y: 0 }
+      const pos = LAYOUT[n.urn] ?? autoPositions.get(n.urn) ?? { x: 0, y: 0 }
       const status = nodeStatus(n.urn, result)
       return {
         id: n.urn,

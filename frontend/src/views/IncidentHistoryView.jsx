@@ -77,6 +77,21 @@ function IncidentRow({ record, expanded, onToggle }) {
         </td>
         <td style={{ color: verifiedColor, fontFamily: 'var(--font-mono)', fontSize: '0.82rem' }}>
           {verifiedIcon}
+          {outcome?.follow_up && (
+            <span
+              title={
+                outcome.follow_up.executed
+                  ? 'Automatic follow-up action succeeded'
+                  : 'Automatic follow-up action did not complete — needs review'
+              }
+              style={{
+                marginLeft: '0.3rem',
+                color: outcome.follow_up.executed ? 'var(--signal-warn)' : 'var(--signal-critical)',
+              }}
+            >
+              ↳
+            </span>
+          )}
         </td>
         <td style={{ color: 'var(--text-lo)', fontSize: '0.75rem' }}>
           {expanded ? '▲' : '▼'}
@@ -114,6 +129,25 @@ function IncidentRow({ record, expanded, onToggle }) {
                   </div>
                   <p style={{ fontSize: '0.82rem', color: 'var(--text-lo)', fontFamily: 'var(--font-mono)' }}>
                     {outcome.execution_detail}
+                  </p>
+                </div>
+              )}
+              {outcome?.follow_up && (
+                <div style={{ marginTop: '0.8rem', paddingTop: '0.8rem', borderTop: '1px dashed var(--border)' }}>
+                  <div style={{
+                    display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.3rem',
+                    fontSize: '0.7rem', fontFamily: 'var(--font-mono)', color: 'var(--signal-warn)',
+                    letterSpacing: '0.06em', textTransform: 'uppercase',
+                  }}>
+                    <span>↳</span>
+                    <span>Automatic Follow-Up (verification failed)</span>
+                  </div>
+                  <p style={{ fontSize: '0.82rem', color: 'var(--text-lo)', fontFamily: 'var(--font-mono)' }}>
+                    {outcome.follow_up.plan.action_type.replace(/_/g, ' ')}
+                    {' — '}
+                    {outcome.follow_up.executed ? '✓ succeeded' : '✗ did not complete'}
+                    {': '}
+                    {outcome.follow_up.execution_detail}
                   </p>
                 </div>
               )}
