@@ -167,7 +167,8 @@ Nexus now runs autonomously every 30 minutes without any developer action.
 cd backend
 pip install pytest pytest-asyncio
 pytest tests/ -v
-# Expected: 24 passed
+# Expected: all passing (test count grows as the suite does — check the
+# summary line at the end of the run rather than a hardcoded number)
 ```
 
 ---
