@@ -1,0 +1,30 @@
+version: 1.0
+runtime: python311
+build:
+  commands:
+    build:
+      - pip install -r backend/requirements.txt
+  env:
+    - name: PIP_NO_CACHE_DIR
+      value: "1"
+run:
+  command: uvicorn app.main:app --host 0.0.0.0 --port 8080
+  network:
+    port: 8080
+    env: PORT
+  env:
+    - name: ENV
+      value: production
+    - name: USE_MOCK_DATAHUB
+      value: "true"
+    - name: MEMORY_BACKEND
+      value: dynamodb
+    - name: DYNAMODB_TABLE
+      value: nexus-incidents
+    - name: AWS_REGION
+      value: us-east-1
+    - name: BEDROCK_MODEL_ID
+      value: anthropic.claude-3-5-sonnet-20241022-v2:0
+    # Secrets injected via App Runner environment variables (not committed)
+    # AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, GROQ_API_KEY
+    # GITHUB_TOKEN, GITHUB_REPO, WRITEBACK_ENABLED

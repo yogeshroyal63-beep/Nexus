@@ -1,0 +1,105 @@
+<svg width="100%" viewBox="0 0 680 580" role="img" xmlns="http://www.w3.org/2000/svg">
+<title>Nexus — Autonomous Developer Agent Architecture</title>
+<desc>Full stack from React frontend through FastAPI, Strands Agents SDK, Amazon Bedrock, DynamoDB, and SNS/EventBridge.</desc>
+<defs>
+<marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+<path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+</marker>
+<style>
+  text { font-family: Inter, sans-serif; fill: #1a2540; }
+  .th { font-size: 14px; font-weight: 600; }
+  .ts { font-size: 12px; fill: #4a6080; }
+  .arr { stroke: #8ba3c0; stroke-width: 1; fill: none; }
+  /* dark mode */
+  @media (prefers-color-scheme: dark) {
+    text { fill: #e0eeff; }
+    .ts { fill: #8ba3c0; }
+    .arr { stroke: #4a6080; }
+  }
+</style>
+</defs>
+
+<!-- Row 1: Frontend -->
+<rect x="220" y="20" width="240" height="52" rx="8" fill="#EBF4FF" stroke="#3B82C4" stroke-width="0.8"/>
+<text class="th" x="340" y="42" text-anchor="middle" dominant-baseline="central" fill="#1a4a7a">React frontend</text>
+<text class="ts" x="340" y="60" text-anchor="middle" dominant-baseline="central" fill="#4a6080">Lineage · Drift · Agent · History</text>
+
+<!-- Arrow down -->
+<line x1="340" y1="72" x2="340" y2="106" class="arr" marker-end="url(#arrow)"/>
+<text class="ts" x="352" y="92" dominant-baseline="central" fill="#4a6080">HTTP</text>
+
+<!-- Row 2: FastAPI -->
+<rect x="140" y="106" width="400" height="52" rx="8" fill="#E6F7F4" stroke="#0F9B80" stroke-width="0.8"/>
+<text class="th" x="340" y="126" text-anchor="middle" dominant-baseline="central" fill="#085041">FastAPI backend</text>
+<text class="ts" x="340" y="144" text-anchor="middle" dominant-baseline="central" fill="#4a6080">/run · /investigate · /incidents · /sns/drift-check</text>
+
+<!-- Arrow down -->
+<line x1="340" y1="158" x2="340" y2="192" class="arr" marker-end="url(#arrow)"/>
+
+<!-- Row 3: Pipeline -->
+<rect x="40" y="192" width="136" height="52" rx="8" fill="#F1EFE8" stroke="#888780" stroke-width="0.6"/>
+<text class="th" x="108" y="212" text-anchor="middle" dominant-baseline="central" fill="#2C2C2A">Drift engine</text>
+<text class="ts" x="108" y="230" text-anchor="middle" dominant-baseline="central" fill="#5F5E5A">KS · PSI · cosine</text>
+
+<rect x="196" y="192" width="136" height="52" rx="8" fill="#F1EFE8" stroke="#888780" stroke-width="0.6"/>
+<text class="th" x="264" y="212" text-anchor="middle" dominant-baseline="central" fill="#2C2C2A">Causal isolator</text>
+<text class="ts" x="264" y="230" text-anchor="middle" dominant-baseline="central" fill="#5F5E5A">Bootstrap · DAG</text>
+
+<rect x="352" y="192" width="136" height="52" rx="8" fill="#F1EFE8" stroke="#888780" stroke-width="0.6"/>
+<text class="th" x="420" y="212" text-anchor="middle" dominant-baseline="central" fill="#2C2C2A">LLM reasoning</text>
+<text class="ts" x="420" y="230" text-anchor="middle" dominant-baseline="central" fill="#5F5E5A">Groq · LLaMA 3.3</text>
+
+<rect x="508" y="192" width="132" height="52" rx="8" fill="#F1EFE8" stroke="#888780" stroke-width="0.6"/>
+<text class="th" x="574" y="212" text-anchor="middle" dominant-baseline="central" fill="#2C2C2A">Write-back</text>
+<text class="ts" x="574" y="230" text-anchor="middle" dominant-baseline="central" fill="#5F5E5A">GitHub issues</text>
+
+<line x1="176" y1="218" x2="196" y2="218" class="arr" marker-end="url(#arrow)"/>
+<line x1="332" y1="218" x2="352" y2="218" class="arr" marker-end="url(#arrow)"/>
+<line x1="488" y1="218" x2="508" y2="218" class="arr" marker-end="url(#arrow)"/>
+
+<!-- Arrow down to Strands -->
+<line x1="340" y1="244" x2="340" y2="278" class="arr" marker-end="url(#arrow)"/>
+
+<!-- Row 4: Strands (hero) -->
+<rect x="100" y="278" width="480" height="68" rx="10" fill="#FEF3DA" stroke="#BA7517" stroke-width="1"/>
+<text class="th" x="340" y="300" text-anchor="middle" dominant-baseline="central" fill="#412402">Strands Agents SDK  ·  Tier 1 Core</text>
+<text class="ts" x="240" y="322" text-anchor="middle" dominant-baseline="central" fill="#633806">tool: assess_risk_level</text>
+<text class="ts" x="440" y="322" text-anchor="middle" dominant-baseline="central" fill="#633806">tool: check_past_incidents</text>
+
+<!-- Strands → Bedrock -->
+<line x1="260" y1="346" x2="200" y2="390" class="arr" marker-end="url(#arrow)"/>
+<!-- Strands → Executor -->
+<line x1="420" y1="346" x2="480" y2="390" class="arr" marker-end="url(#arrow)"/>
+
+<!-- Row 5 -->
+<rect x="60" y="390" width="200" height="52" rx="8" fill="#FAECE7" stroke="#993C1D" stroke-width="0.6"/>
+<text class="th" x="160" y="410" text-anchor="middle" dominant-baseline="central" fill="#4A1B0C">Amazon Bedrock</text>
+<text class="ts" x="160" y="428" text-anchor="middle" dominant-baseline="central" fill="#993C1D">Claude 3.5 Sonnet</text>
+
+<rect x="280" y="390" width="120" height="52" rx="8" fill="#EAF3DE" stroke="#3B6D11" stroke-width="0.6"/>
+<text class="th" x="340" y="410" text-anchor="middle" dominant-baseline="central" fill="#173404">Executor</text>
+<text class="ts" x="340" y="428" text-anchor="middle" dominant-baseline="central" fill="#3B6D11">gated · verifier</text>
+
+<rect x="420" y="390" width="200" height="52" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.6"/>
+<text class="th" x="520" y="410" text-anchor="middle" dominant-baseline="central" fill="#26215C">DynamoDB</text>
+<text class="ts" x="520" y="428" text-anchor="middle" dominant-baseline="central" fill="#534AB7">Incident memory store</text>
+
+<line x1="400" y1="416" x2="420" y2="416" class="arr" marker-end="url(#arrow)"/>
+
+<!-- Row 6 -->
+<line x1="160" y1="442" x2="160" y2="490" class="arr" marker-end="url(#arrow)"/>
+<line x1="520" y1="442" x2="520" y2="490" class="arr" marker-end="url(#arrow)"/>
+
+<rect x="40" y="490" width="236" height="52" rx="8" fill="#F1EFE8" stroke="#888780" stroke-width="0.6"/>
+<text class="th" x="158" y="510" text-anchor="middle" dominant-baseline="central" fill="#2C2C2A">SNS + EventBridge</text>
+<text class="ts" x="158" y="528" text-anchor="middle" dominant-baseline="central" fill="#5F5E5A">Scheduled background trigger</text>
+
+<rect x="404" y="490" width="236" height="52" rx="8" fill="#F1EFE8" stroke="#888780" stroke-width="0.6"/>
+<text class="th" x="522" y="510" text-anchor="middle" dominant-baseline="central" fill="#2C2C2A">AWS App Runner</text>
+<text class="ts" x="522" y="528" text-anchor="middle" dominant-baseline="central" fill="#5F5E5A">Container deploy · auto-scale</text>
+
+<!-- SNS push trigger back to FastAPI -->
+<path d="M40 516 L20 516 L20 132 L140 132" fill="none" stroke="#8ba3c0" stroke-width="0.8" stroke-dasharray="4 3" marker-end="url(#arrow)"/>
+<text class="ts" x="13" y="330" text-anchor="middle" dominant-baseline="central" transform="rotate(-90,13,330)" fill="#8ba3c0">push trigger</text>
+
+</svg>

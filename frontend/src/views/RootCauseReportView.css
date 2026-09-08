@@ -1,0 +1,140 @@
+.report-view {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.report-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+  padding: 20px 22px;
+  transition: background-color 0.25s ease, border-color 0.25s ease;
+}
+
+.report-card h3 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-lo);
+  margin: 0 0 12px;
+}
+
+.report-summary-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.report-summary h2 {
+  font-size: 15px;
+  margin: 0;
+  color: var(--text-hi);
+}
+
+.severity-badge {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 3px 9px;
+  border: 1px solid;
+  border-radius: 20px;
+  white-space: nowrap;
+}
+
+.report-lede {
+  font-size: 14px;
+  color: var(--text-hi);
+  line-height: 1.55;
+  margin: 0 0 10px;
+}
+
+.report-body {
+  font-size: 13px;
+  color: var(--text-lo);
+  line-height: 1.6;
+  margin: 0;
+}
+
+.report-grid {
+  display: grid;
+  grid-template-columns: 1fr 1.4fr;
+  gap: 16px;
+}
+
+.root-cause-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.root-cause-list li {
+  background: var(--signal-critical-dim);
+  border: 1px solid var(--signal-critical);
+  color: var(--signal-critical);
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+}
+
+.fix-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.fix-list li {
+  border-left: 2px solid var(--signal-model);
+  padding-left: 12px;
+}
+
+.fix-action {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-hi);
+}
+
+.fix-target {
+  font-size: 10.5px;
+  color: var(--signal-model);
+  margin: 3px 0;
+}
+
+.fix-rationale {
+  font-size: 12px;
+  color: var(--text-lo);
+  line-height: 1.5;
+}
+
+.evidence-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11.5px;
+}
+
+.evidence-table th {
+  text-align: left;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 9.5px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.evidence-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--hairline);
+  color: var(--text-lo);
+}
+
+.row-genuine td {
+  color: var(--signal-critical);
+}

@@ -1,0 +1,122 @@
+.graph-shell {
+  position: relative;
+  height: calc(100vh - 260px);
+  min-height: 420px;
+  background: var(--bg-panel);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  transition: background-color 0.25s ease, border-color 0.25s ease;
+}
+
+.react-flow__attribution { display: none; }
+.react-flow__controls-button {
+  background: var(--bg-panel-raised);
+  border-bottom: 1px solid var(--hairline);
+  color: var(--text-lo);
+}
+.react-flow__controls-button:hover { background: var(--bg-panel); color: var(--text-hi); }
+
+.nexus-node {
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  border: 1.5px solid var(--hairline);
+  background: var(--bg-panel-raised);
+  min-width: 170px;
+  transition: border-color 0.3s ease, box-shadow 0.3s ease, background 0.3s ease;
+}
+
+.nexus-node-type {
+  font-size: 9px;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 3px;
+}
+
+.nexus-node-label {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-hi);
+}
+
+.nexus-node-tag {
+  margin-top: 6px;
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  padding: 2px 6px;
+  border-radius: 3px;
+  display: inline-block;
+}
+
+.nexus-node-root-cause {
+  border-color: var(--signal-critical);
+  background: var(--signal-critical-dim);
+  box-shadow: 0 0 0 3px rgba(255, 93, 93, 0.12), 0 0 20px rgba(255, 93, 93, 0.15);
+}
+.nexus-node-root-cause .nexus-node-tag {
+  background: var(--signal-critical);
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.nexus-node-on-path {
+  border-color: var(--signal-trace);
+  background: var(--signal-trace-dim);
+}
+
+.nexus-node-confounded {
+  border-color: var(--text-faint);
+  opacity: 0.7;
+}
+.nexus-node-confounded .nexus-node-tag {
+  background: var(--bg-void);
+  color: var(--text-lo);
+}
+
+.nexus-handle {
+  width: 6px;
+  height: 6px;
+  background: var(--text-faint);
+  border: 1.5px solid var(--bg-panel);
+  opacity: 0.6;
+}
+
+.graph-legend {
+  position: absolute;
+  bottom: 14px;
+  left: 14px;
+  display: flex;
+  gap: 18px;
+  font-size: 10.5px;
+  color: var(--text-lo);
+  background: var(--bg-overlay);
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--hairline);
+  backdrop-filter: blur(4px);
+}
+
+.graph-legend span { display: flex; align-items: center; gap: 6px; }
+
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.dot-idle { background: var(--hairline); }
+.dot-confounded { background: var(--text-faint); }
+.dot-path { background: var(--signal-trace); }
+.dot-root { background: var(--signal-critical); }
+
+.empty-state {
+  height: calc(100vh - 260px);
+  min-height: 420px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: var(--text-lo);
+  border: 1px dashed var(--hairline);
+  border-radius: var(--radius-md);
+  font-size: 13px;
+}
+
+.empty-sub { color: var(--text-faint); font-size: 11.5px; }
