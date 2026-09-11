@@ -52,7 +52,7 @@ def assess_risk_level(action_type: str, confidence: float, has_similar_failures:
     return json.dumps({"risk_level": risk, "requires_approval": requires_approval})
 
 agent = Agent(
-    model=BedrockModel(model_id="anthropic.claude-sonnet-4-5-20250929-v1:0"),
+    model=BedrockModel(model_id="amazon.nova-pro-v1:0"),
     system_prompt=PLANNER_SYSTEM_PROMPT,
     tools=[assess_risk_level, check_past_incidents],
 )
@@ -66,7 +66,7 @@ The key design choice here: `assess_risk_level` is deterministic. The LLM calls 
 
 The backend is FastAPI with four main agents:
 
-**Planner** — powered by Strands Agents SDK + Amazon Bedrock Claude Sonnet 4.5. Gets the diagnosed report, calls its tools, returns an action decision.
+**Planner** — powered by Strands Agents SDK + Amazon Bedrock Nova Pro. Gets the diagnosed report, calls its tools, returns an action decision.
 
 **Executor** — carries out the action: retrain trigger, rollback, data quarantine, or GitHub issue. Degrades gracefully when credentials are not configured.
 

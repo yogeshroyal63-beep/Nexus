@@ -15,17 +15,15 @@ class Settings(BaseSettings):
     AWS_ACCESS_KEY_ID: str = ""
     AWS_SECRET_ACCESS_KEY: str = ""
     # Bedrock model for the Planner + reasoning layer
-    # FIXED — anthropic.claude-3-5-sonnet-20241022-v2:0 was removed from
-    # Bedrock's model catalog (confirmed via `aws bedrock
-    # list-foundation-models` returning no such model for a fresh account
-    # in us-east-1; Bedrock's Anthropic lineup had moved on to newer
-    # generations). Repointed to a currently ACTIVE, version-pinned model
-    # id rather than an unpinned alias, so behavior doesn't silently shift
-    # under a future model swap. Override via BEDROCK_MODEL_ID if your
-    # account's available catalog differs — check with
-    # `aws bedrock list-foundation-models --region <region>
-    # --query "modelSummaries[?providerName=='Anthropic']"` before deploying.
-    BEDROCK_MODEL_ID: str = "anthropic.claude-sonnet-4-5-20250929-v1:0"
+    # Switched from Anthropic Claude to Amazon Nova Pro — a native
+    # Bedrock-first model (no separate Anthropic catalog availability to
+    # track across regions/accounts) accessed via the same Converse API
+    # Strands' BedrockModel wrapper already uses, so this is a
+    # configuration-level swap, not a code-level one. Override via
+    # BEDROCK_MODEL_ID if a different model fits your account/region —
+    # check with `aws bedrock list-foundation-models --region <region>`
+    # before deploying.
+    BEDROCK_MODEL_ID: str = "amazon.nova-pro-v1:0"
 
     # --- Groq (Explainer / report generation) --------------------------------
     GROQ_API_KEY: str = ""
