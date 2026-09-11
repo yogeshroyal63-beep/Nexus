@@ -4,7 +4,7 @@ Planner Agent — powered by AWS Strands Agents SDK + Amazon Bedrock.
 This is the heart of Nexus's Tier 1 requirement: Strands Agents SDK
 orchestrates the reasoning and decision-making loop. The Planner receives
 a diagnosed RootCauseReport and past incident history, then decides ONE
-concrete remediation action using Claude 3.5 Sonnet via Bedrock.
+concrete remediation action using Amazon Nova Pro via Bedrock.
 
 Strands tools defined here:
   - assess_risk_level: deterministic risk assessment (not LLM-guessed)

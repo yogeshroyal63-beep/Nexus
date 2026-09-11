@@ -1,0 +1,1 @@
+{"output":{"message":{"content":[{"text":"Greetings, it's a pleasure to connect."}],"role":"assistant"}},"stopReason":"end_turn","usage":{"inputTokens":6,"outputTokens":11,"totalTokens":17,"cacheReadInputTokenCount":0,"cacheWriteInputTokenCount":0}}

@@ -74,7 +74,7 @@
 <!-- Row 5 -->
 <rect x="60" y="390" width="200" height="52" rx="8" fill="#FAECE7" stroke="#993C1D" stroke-width="0.6"/>
 <text class="th" x="160" y="410" text-anchor="middle" dominant-baseline="central" fill="#4A1B0C">Amazon Bedrock</text>
-<text class="ts" x="160" y="428" text-anchor="middle" dominant-baseline="central" fill="#993C1D">Claude 3.5 Sonnet</text>
+<text class="ts" x="160" y="428" text-anchor="middle" dominant-baseline="central" fill="#993C1D">Amazon Nova Pro</text>
 
 <rect x="280" y="390" width="120" height="52" rx="8" fill="#EAF3DE" stroke="#3B6D11" stroke-width="0.6"/>
 <text class="th" x="340" y="410" text-anchor="middle" dominant-baseline="central" fill="#173404">Executor</text>
